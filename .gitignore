@@ -21,3 +21,7 @@ dist-ssr
 *.sln
 *.sw?
 .env
+
+# Ruby
+vendor/bundle
+.bundle
