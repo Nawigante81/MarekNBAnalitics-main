@@ -61,3 +61,20 @@
 .glow-animation {
   animation: glow 2s ease-in-out infinite;
 }
+
+/* Accessibility: Skip link styling */
+.skip-link {
+  position: absolute;
+  top: -40px;
+  left: 0;
+  background: #1f2937; /* gray-800 */
+  color: #fff;
+  padding: 8px 12px;
+  z-index: 1000;
+  border-radius: 0 0 0.5rem 0.5rem;
+}
+
+.skip-link:focus {
+  top: 0;
+  outline: 2px solid #60a5fa; /* blue-400 */
+}

@@ -8,8 +8,7 @@ services:
       dockerfile: Dockerfile
     container_name: nba-backend
     restart: unless-stopped
-    ports:
-      - "8000:8000"
+    # No external port exposure in production; routed via Caddy
     environment:
       - NODE_ENV=production
       - PYTHONPATH=/app
@@ -31,11 +30,12 @@ services:
   frontend:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.frontend
+      args:
+        - VITE_API_BASE_URL=/api
     container_name: nba-frontend
     restart: unless-stopped
-    ports:
-      - "5173:80"
+    # No external port exposure; routed via Caddy
     depends_on:
       backend:
         condition: service_healthy

@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 import pytz
-from external_apis import fetch_nba_teams, fetch_nba_games, fetch_live_odds, fetch_nba_players, fetch_player_stats, fetch_player_by_id
+from external_apis import fetch_nba_teams, fetch_nba_games, fetch_live_odds, fetch_nba_players, fetch_player_stats, fetch_player_by_id, ExternalAPIError
 
 # Temporarily use mock implementations to avoid httpx_socks conflicts with supabase
 # These will be loaded dynamically when needed
@@ -411,6 +411,9 @@ async def find_game_odds(
         return {"game": match, "odds": flat_rows, "source": "external_odds"}
     except HTTPException:
         raise
+    except ExternalAPIError as e:
+        logger.error(f"Upstream odds provider error during /api/odds/find: status={getattr(e, 'status', None)}; {e}")
+        raise HTTPException(status_code=502, detail=f"Upstream odds provider error: {e}")
     except Exception as e:
         logger.error(f"Error finding game odds: {e}")
         raise HTTPException(status_code=500, detail="Failed to find game odds")
@@ -664,6 +667,9 @@ async def get_game_odds(game_id: str):
                     })
 
         return {"odds": flat_rows, "source": "external_odds"}
+    except ExternalAPIError as e:
+        logger.error(f"Upstream odds provider error during /api/odds/{game_id}: status={getattr(e, 'status', None)}; {e}")
+        raise HTTPException(status_code=502, detail=f"Upstream odds provider error: {e}")
     except Exception as e:
         return {"error": str(e)}, 500
 
@@ -752,6 +758,9 @@ async def get_live_odds():
         }
     except HTTPException:
         raise
+    except ExternalAPIError as e:
+        logger.error(f"Upstream odds provider error during /api/live-odds: status={getattr(e, 'status', None)}; {e}")
+        raise HTTPException(status_code=502, detail=f"Upstream odds provider error: {e}")
     except Exception as e:
         logger.error(f"Error fetching live odds: {e}")
         raise HTTPException(status_code=500, detail="Failed to fetch live odds")
@@ -1572,6 +1581,36 @@ async def scrape_bulls_players_endpoint():
         raise HTTPException(status_code=500, detail=f"Failed to scrape Bulls players: {str(e)}")
 
 
+@app.post("/api/scrape/full")
+async def trigger_full_scrape(include_rosters: bool = True):
+    """ADMIN: Uruchamia pełny scraping (teams + odds + rosters + Bulls) w tle.
+    - include_rosters: czy skrobać składy wszystkich drużyn (domyślnie True)
+    Zwraca szybki status 'in_progress' aby nie blokować żądania HTTP.
+    """
+    try:
+        from scrapers import scrape_all_data as run_full_scrape
+
+        supabase = app.state.supabase
+        if not supabase:
+            raise HTTPException(status_code=503, detail="Supabase not configured")
+
+        logger.info(f"Manual full scrape triggered (include_rosters={include_rosters})")
+        # Uruchom w tle aby nie blokować klienta
+        asyncio.create_task(run_full_scrape(supabase, include_rosters=include_rosters))
+
+        return {
+            "message": "Full scrape started",
+            "include_rosters": include_rosters,
+            "status": "in_progress",
+            "timestamp": datetime.now().isoformat(),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error triggering full scrape: {e}")
+        raise HTTPException(status_code=500, detail="Failed to trigger full scrape")
+
+
 @app.get("/api/betting-recommendations")
 async def get_betting_recommendations():
     """Get current betting recommendations"""
@@ -1632,6 +1671,9 @@ async def get_betting_recommendations():
             })
 
         return {"recommendations": recommendations, "valueBets": value_bets, "count": len(recommendations), "timestamp": datetime.now().isoformat()}
+    except ExternalAPIError as e:
+        logger.error(f"Upstream odds provider error during /api/betting-recommendations: status={getattr(e, 'status', None)}; {e}")
+        raise HTTPException(status_code=502, detail=f"Upstream odds provider error: {e}")
     except Exception as e:
         logger.error(f"Error generating betting recommendations: {e}")
         raise HTTPException(status_code=500, detail="Failed to generate betting recommendations")

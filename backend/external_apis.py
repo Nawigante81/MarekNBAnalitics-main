@@ -4,8 +4,9 @@
 import asyncio
 import aiohttp
 import os
+import time
 from datetime import datetime, timedelta
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, Union
 import logging
 
 logger = logging.getLogger(__name__)
@@ -17,6 +18,19 @@ BALLDONTLIE_API_KEY = os.getenv("BALLDONTLIE_API_KEY")  # Optional - some endpoi
 # Sample odds API configuration (you would use TheOddsAPI or similar)
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 ODDS_API_KEY = os.getenv("ODDS_API_KEY")
+ODDS_CACHE_TTL_SECONDS = int(os.getenv("ODDS_CACHE_TTL_SECONDS", "20"))  # 15-30s suggested
+
+# Simple in-memory cache for odds to avoid hammering provider
+_ODDS_CACHE_DATA: Optional[List[Dict[str, Any]]] = None
+_ODDS_CACHE_TS: float = 0.0
+
+
+class ExternalAPIError(Exception):
+    """Represents an upstream provider error (non-200 or malformed response)."""
+
+    def __init__(self, message: str, status: Optional[int] = None):
+        super().__init__(message)
+        self.status = status
 
 class NBADataFetcher:
     """Fetches NBA data from balldontlie.io API"""
@@ -28,7 +42,8 @@ class NBADataFetcher:
             self.headers["Authorization"] = f"Bearer {BALLDONTLIE_API_KEY}"
     
     async def __aenter__(self):
-        self.session = aiohttp.ClientSession(headers=self.headers)
+        timeout = aiohttp.ClientTimeout(total=6)  # seconds
+        self.session = aiohttp.ClientSession(headers=self.headers, timeout=timeout)
         return self
     
     async def __aexit__(self, exc_type, exc_val, exc_tb):
@@ -229,6 +244,39 @@ class OddsDataFetcher:
         if self.session:
             await self.session.close()
     
+    def _normalize_games_payload(self, payload: Union[List[Any], Dict[str, Any], None]) -> List[Dict[str, Any]]:
+        """Normalize various upstream payload shapes to a list of game dicts."""
+        if payload is None:
+            return []
+        if isinstance(payload, list):
+            # Ensure elements are dicts
+            return [g for g in payload if isinstance(g, dict)]
+        if isinstance(payload, dict):
+            for key in ("data", "events", "games", "matches", "response"):
+                val = payload.get(key)
+                if isinstance(val, list):
+                    return [g for g in val if isinstance(g, dict)]
+            # Single game object edge-case
+            if payload.get("id") and (payload.get("bookmakers") or payload.get("sites")):
+                return [payload]
+        return []
+
+    def _coerce_team_name(self, value: Any) -> str:
+        """Coerce upstream team representation (str or dict) to a readable name/abbr."""
+        if isinstance(value, str):
+            return value
+        if isinstance(value, dict):
+            # Prefer full name, then name, then abbreviation-like fields
+            return (
+                value.get("full_name")
+                or value.get("name")
+                or value.get("abbreviation")
+                or value.get("key")
+                or value.get("team")
+                or ""
+            )
+        return ""
+
     async def get_live_odds(self, sport: str = "basketball_nba") -> List[Dict[str, Any]]:
         """Get live odds for NBA games"""
         try:
@@ -244,70 +292,129 @@ class OddsDataFetcher:
                 "regions": "us",
                 "markets": "h2h,spreads,totals",
                 "oddsFormat": "american",
-                "dateFormat": "iso"
+                "dateFormat": "iso",
             }
+            # The Odds API expects apiKey as a query parameter; include it defensively
+            params["apiKey"] = ODDS_API_KEY
             
+            # Serve from cache if fresh
+            now = time.time()
+            global _ODDS_CACHE_DATA, _ODDS_CACHE_TS
+            if _ODDS_CACHE_DATA is not None and (now - _ODDS_CACHE_TS) < ODDS_CACHE_TTL_SECONDS:
+                logger.info("Serving odds from in-memory cache")
+                return _ODDS_CACHE_DATA
+
             async with self.session.get(url, params=params) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    
-                    # Transform to match our expected format
-                    transformed_odds = []
-                    for game in data:
-                        game_odds = {
-                            "gameId": game["id"],
-                            "homeTeam": game["home_team"],
-                            "awayTeam": game["away_team"],
-                            "startTime": game["commence_time"],
-                            "bookmakers": []
+                if response.status != 200:
+                    # Read a short prefix of the upstream body to aid debugging
+                    try:
+                        body_preview = (await response.text())[:500]
+                    except Exception:
+                        body_preview = "<unreadable>"
+                    logger.error(
+                        f"Upstream odds provider non-200: status={response.status}; body_prefix={body_preview}"
+                    )
+                    # Fallback to cache if available
+                    if _ODDS_CACHE_DATA is not None and (time.time() - _ODDS_CACHE_TS) < max(ODDS_CACHE_TTL_SECONDS, 10):
+                        logger.warning("Returning cached odds due to upstream error")
+                        return _ODDS_CACHE_DATA
+                    raise ExternalAPIError(f"odds upstream returned {response.status}", status=response.status)
+
+                # Parse payload defensively (could be list or dict wrapper)
+                try:
+                    raw = await response.json(content_type=None)
+                except Exception as je:
+                    logger.error(f"Failed to parse odds JSON: {je}")
+                    raise ExternalAPIError("invalid JSON from odds upstream")
+
+                games = self._normalize_games_payload(raw)
+
+                # Transform to match our expected format
+                transformed_odds: List[Dict[str, Any]] = []
+                for game in games:
+                    home_raw = game.get("home_team")
+                    away_raw = game.get("away_team")
+                    home_name = self._coerce_team_name(home_raw)
+                    away_name = self._coerce_team_name(away_raw)
+
+                    game_odds: Dict[str, Any] = {
+                        "gameId": game.get("id") or game.get("game_id") or "",
+                        "homeTeam": home_name,
+                        "awayTeam": away_name,
+                        "startTime": game.get("commence_time") or game.get("start_time") or game.get("date"),
+                        "bookmakers": [],
+                    }
+
+                    # Support both TheOddsAPI 'bookmakers' and some providers 'sites'
+                    bookmakers = game.get("bookmakers") or game.get("sites") or []
+                    for bookmaker in bookmakers:
+                        name = (
+                            bookmaker.get("title")
+                            or bookmaker.get("name")
+                            or bookmaker.get("key")
+                            or "unknown"
+                        )
+                        bm_data: Dict[str, Any] = {
+                            "name": name,
+                            "moneyline": {"home": None, "away": None},
+                            "spread": {"line": None, "home": None, "away": None},
+                            "total": {"line": None, "over": None, "under": None},
                         }
-                        
-                        for bookmaker in game.get("bookmakers", []):
-                            bm_data = {
-                                "name": bookmaker["title"],
-                                "moneyline": {"home": 0, "away": 0},
-                                "spread": {"line": 0, "home": 0, "away": 0},
-                                "total": {"line": 0, "over": 0, "under": 0}
-                            }
-                            
-                            for market in bookmaker.get("markets", []):
-                                if market["key"] == "h2h":
-                                    outcomes = market["outcomes"]
-                                    for outcome in outcomes:
-                                        if outcome["name"] == game["home_team"]:
-                                            bm_data["moneyline"]["home"] = outcome["price"]
-                                        else:
-                                            bm_data["moneyline"]["away"] = outcome["price"]
-                                
-                                elif market["key"] == "spreads":
-                                    outcomes = market["outcomes"]
-                                    for outcome in outcomes:
-                                        if outcome["name"] == game["home_team"]:
-                                            bm_data["spread"]["home"] = outcome["price"]
-                                            bm_data["spread"]["line"] = outcome["point"]
-                                        else:
-                                            bm_data["spread"]["away"] = outcome["price"]
-                                
-                                elif market["key"] == "totals":
-                                    outcomes = market["outcomes"]
-                                    for outcome in outcomes:
-                                        if outcome["name"] == "Over":
-                                            bm_data["total"]["over"] = outcome["price"]
-                                            bm_data["total"]["line"] = outcome["point"]
-                                        else:
-                                            bm_data["total"]["under"] = outcome["price"]
-                            
-                            game_odds["bookmakers"].append(bm_data)
-                        
-                        transformed_odds.append(game_odds)
-                    
-                    logger.info(f"Fetched odds for {len(transformed_odds)} games")
-                    return transformed_odds
-                else:
-                    logger.error(f"Error fetching odds: {response.status}")
-                    return self._get_mock_odds()
+
+                        markets = bookmaker.get("markets") or bookmaker.get("odds") or []
+                        for market in markets:
+                            key = market.get("key") or market.get("market")
+                            outcomes = market.get("outcomes") or market.get("outcome") or []
+                            if key == "h2h":
+                                for outcome in outcomes:
+                                    oname = outcome.get("name") or outcome.get("team")
+                                    price = outcome.get("price") or outcome.get("odds")
+                                    if oname == home_name:
+                                        bm_data["moneyline"]["home"] = price
+                                    elif oname == away_name:
+                                        bm_data["moneyline"]["away"] = price
+                            elif key == "spreads":
+                                for outcome in outcomes:
+                                    oname = outcome.get("name") or outcome.get("team")
+                                    price = outcome.get("price") or outcome.get("odds")
+                                    point = outcome.get("point") or outcome.get("line")
+                                    if oname == home_name:
+                                        bm_data["spread"]["home"] = price
+                                        bm_data["spread"]["line"] = point
+                                    elif oname == away_name:
+                                        bm_data["spread"]["away"] = price
+                                        # If line missing on away, keep whatever was set for home
+                            elif key == "totals":
+                                for outcome in outcomes:
+                                    oname = (outcome.get("name") or outcome.get("label") or "").lower()
+                                    price = outcome.get("price") or outcome.get("odds")
+                                    point = outcome.get("point") or outcome.get("line")
+                                    if "over" in oname:
+                                        bm_data["total"]["over"] = price
+                                        bm_data["total"]["line"] = point
+                                    elif "under" in oname:
+                                        bm_data["total"]["under"] = price
+
+                        game_odds["bookmakers"].append(bm_data)
+
+                    transformed_odds.append(game_odds)
+
+                logger.info(f"Fetched odds for {len(transformed_odds)} games")
+                # Update cache
+                _ODDS_CACHE_DATA = transformed_odds
+                _ODDS_CACHE_TS = time.time()
+                return transformed_odds
         except Exception as e:
+            # If upstream error and cache available, use cache; otherwise follow previous behavior
+            if isinstance(e, ExternalAPIError):
+                if _ODDS_CACHE_DATA is not None and (time.time() - _ODDS_CACHE_TS) < max(ODDS_CACHE_TTL_SECONDS, 10):
+                    logger.warning("Returning cached odds due to upstream exception")
+                    return _ODDS_CACHE_DATA
+                raise
             logger.error(f"Exception fetching odds: {e}")
+            if _ODDS_CACHE_DATA is not None and (time.time() - _ODDS_CACHE_TS) < max(ODDS_CACHE_TTL_SECONDS, 10):
+                logger.warning("Returning cached odds due to exception")
+                return _ODDS_CACHE_DATA
             return self._get_mock_odds()
     
     def _get_mock_odds(self) -> List[Dict[str, Any]]:
@@ -409,6 +516,7 @@ async def fetch_live_odds() -> List[Dict[str, Any]]:
 __all__ = [
     'NBADataFetcher',
     'OddsDataFetcher', 
+    'ExternalAPIError',
     'fetch_nba_teams',
     'fetch_nba_players',
     'fetch_nba_games',

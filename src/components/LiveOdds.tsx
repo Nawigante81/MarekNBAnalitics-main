@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any, react-hooks/exhaustive-deps */
 import React, { useState, useEffect } from 'react';
 import { TrendingUp, TrendingDown, RefreshCw, AlertTriangle, Clock, Activity } from 'lucide-react';
 import { api } from '../services/api';
@@ -43,6 +44,12 @@ const LiveOdds: React.FC<LiveOddsProps> = ({ selectedGameId }) => {
   const [lastUpdate, setLastUpdate] = useState(new Date());
   const [loading, setLoading] = useState(true);
   const [showSelectedOnly, setShowSelectedOnly] = useState(false);
+  // Finder state
+  const [homeAbbr, setHomeAbbr] = useState('');
+  const [awayAbbr, setAwayAbbr] = useState('');
+  const [date, setDate] = useState<string>('');
+  const [slug, setSlug] = useState<string>('');
+  const [foundGame, setFoundGame] = useState<OddsData | null>(null);
 
   const loadOdds = async () => {
     setLoading(true);
@@ -166,6 +173,52 @@ const LiveOdds: React.FC<LiveOddsProps> = ({ selectedGameId }) => {
     return { value: bestValue, book: best };
   };
 
+  const getConsensus = (bookmakers: OddsData['bookmakers']) => {
+    const spreadLines = bookmakers.map(b => b.spread?.line).filter((n): n is number => typeof n === 'number');
+    const totalLines = bookmakers.map(b => b.total?.line).filter((n): n is number => typeof n === 'number');
+    const mlHome = bookmakers.map(b => b.moneyline?.home).filter((n): n is number => typeof n === 'number');
+    const avg = (arr: number[]) => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
+    const range = (arr: number[]) => arr.length ? [Math.min(...arr), Math.max(...arr)] as [number, number] : undefined;
+    return {
+      spreadAvg: avg(spreadLines),
+      spreadRange: range(spreadLines),
+      totalAvg: avg(totalLines),
+      totalRange: range(totalLines),
+      mlHomeAvg: avg(mlHome)
+    };
+  };
+
+  const mapFoundResponseToOddsData = (resp: { game: any; odds: any[] }) => {
+    if (!resp || !resp.game) return null;
+    const g = resp.game;
+    const bookmakers = (resp.odds || []).map((b: any) => ({
+      name: b.name || b.bookmaker || 'Book',
+      moneyline: {
+        home: b.moneyline?.home ?? b.ml?.home ?? 0,
+        away: b.moneyline?.away ?? b.ml?.away ?? 0,
+      },
+      spread: {
+        line: b.spread?.line ?? 0,
+        home: b.spread?.home ?? 0,
+        away: b.spread?.away ?? 0,
+      },
+      total: {
+        line: b.total?.line ?? 0,
+        over: b.total?.over ?? 0,
+        under: b.total?.under ?? 0,
+      },
+    }));
+    const mapped: OddsData = {
+      gameId: g.gameId || g.id || `${g.homeTeam}-${g.awayTeam}`,
+      homeTeam: g.homeTeam || g.home || g.home_abbr || 'HOME',
+      awayTeam: g.awayTeam || g.away || g.away_abbr || 'AWAY',
+      startTime: g.startTime || g.commence_time || g.date || '',
+      bookmakers,
+      movements: [],
+    };
+    return mapped;
+  };
+
   const getAlertColor = (severity: string) => {
     switch (severity) {
       case 'high': return 'border-red-400/30 bg-red-600/10 text-red-400';
@@ -201,6 +254,75 @@ const LiveOdds: React.FC<LiveOddsProps> = ({ selectedGameId }) => {
           <span>Live Odds Monitor</span>
         </h2>
         <div className="flex items-center space-x-4">
+          {/* Quick Odds Finder */}
+          <form
+            className="hidden md:flex items-end space-x-2"
+            onSubmit={async (e) => {
+              e.preventDefault();
+              try {
+                const params: Record<string, string> = {} as any;
+                if (homeAbbr) params.homeAbbr = homeAbbr.toUpperCase();
+                if (awayAbbr) params.awayAbbr = awayAbbr.toUpperCase();
+                if (date) params.date = date; // YYYY-MM-DD
+                if (slug) params.slug = slug;
+                const resp = await api.games.findOdds(params as any);
+                const mapped = mapFoundResponseToOddsData(resp as any);
+                if (mapped) {
+                  setFoundGame(mapped);
+                  setSelectedGame(mapped.gameId);
+                }
+              } catch (err) {
+                console.error('Find odds error:', err);
+                setFoundGame(null);
+              }
+            }}
+          >
+            <div className="flex flex-col">
+              <label className="text-xs text-gray-400">Home</label>
+              <input
+                value={homeAbbr}
+                onChange={(e) => setHomeAbbr(e.target.value)}
+                placeholder="CHI"
+                title="Home team abbreviation"
+                aria-label="Home team abbreviation"
+                className="px-2 py-1 rounded bg-gray-800/50 border border-gray-700/50 text-sm"
+              />
+            </div>
+            <div className="flex flex-col">
+              <label className="text-xs text-gray-400">Away</label>
+              <input
+                value={awayAbbr}
+                onChange={(e) => setAwayAbbr(e.target.value)}
+                placeholder="LAL"
+                title="Away team abbreviation"
+                aria-label="Away team abbreviation"
+                className="px-2 py-1 rounded bg-gray-800/50 border border-gray-700/50 text-sm"
+              />
+            </div>
+            <div className="flex flex-col">
+              <label className="text-xs text-gray-400">Date</label>
+              <input
+                type="date"
+                value={date}
+                onChange={(e) => setDate(e.target.value)}
+                title="Game date"
+                aria-label="Game date"
+                className="px-2 py-1 rounded bg-gray-800/50 border border-gray-700/50 text-sm"
+              />
+            </div>
+            <div className="flex flex-col">
+              <label className="text-xs text-gray-400">Slug</label>
+              <input
+                value={slug}
+                onChange={(e) => setSlug(e.target.value)}
+                placeholder="optional"
+                title="Game slug"
+                aria-label="Game slug"
+                className="px-2 py-1 rounded bg-gray-800/50 border border-gray-700/50 text-sm"
+              />
+            </div>
+            <button type="submit" className="glass-card px-3 py-1 text-sm">Find</button>
+          </form>
           {selectedGame && (
             <div className="glass-card px-3 py-2 flex items-center space-x-2">
               <span className="text-sm text-gray-300">Selected game:</span>
@@ -213,31 +335,37 @@ const LiveOdds: React.FC<LiveOddsProps> = ({ selectedGameId }) => {
               </button>
             </div>
           )}
-          <div className="flex items-center space-x-2">
+          <label className="flex items-center space-x-2 cursor-pointer">
             <input
               type="checkbox"
               checked={autoRefresh}
               onChange={(e) => setAutoRefresh(e.target.checked)}
               className="rounded"
+              aria-label="Auto-refresh"
+              title="Auto-refresh"
             />
             <span className="text-sm text-gray-300">Auto-refresh</span>
-          </div>
-          <div className="flex items-center space-x-2">
+          </label>
+          <label className="flex items-center space-x-2 cursor-pointer">
             <input
               type="checkbox"
               checked={showSelectedOnly}
               onChange={(e) => setShowSelectedOnly(e.target.checked)}
               disabled={!selectedGame}
               className="rounded"
+              aria-label="Show only selected game"
+              title="Show only selected game"
             />
             <span className={`text-sm ${selectedGame ? 'text-gray-300' : 'text-gray-500'}`}>Only selected</span>
-          </div>
+          </label>
           <button
             onClick={async () => {
               await loadOdds();
               setLastUpdate(new Date());
             }}
             className="glass-card p-2 hover:bg-white/10 transition-colors"
+            aria-label="Refresh odds"
+            title="Refresh odds"
           >
             <RefreshCw className="w-5 h-5 text-gray-400 hover:text-white" />
           </button>
@@ -263,6 +391,15 @@ const LiveOdds: React.FC<LiveOddsProps> = ({ selectedGameId }) => {
               </h3>
             </div>
             <div className="p-6 space-y-3">
+              {foundGame && (
+                <div className="p-3 rounded-lg border border-blue-400/30 bg-blue-600/10 text-blue-300">
+                  <div className="text-sm font-medium mb-1">Found Game</div>
+                  <div className="text-xs">
+                    {foundGame.homeTeam} vs {foundGame.awayTeam}
+                  </div>
+                  <div className="text-xs opacity-80 mt-1">Bookmakers: {foundGame.bookmakers.length}</div>
+                </div>
+              )}
               {alerts.map((alert) => (
                 <div key={alert.id} className={`p-3 rounded-lg border ${getAlertColor(alert.severity)}`}>
                   <div className="flex items-start justify-between mb-2">
@@ -344,6 +481,14 @@ const LiveOdds: React.FC<LiveOddsProps> = ({ selectedGameId }) => {
                       <div className="text-xs text-green-400">
                         Best: {formatOdds(getBestOdds(game.bookmakers, 'spread', 'home').value)}
                       </div>
+                      {(() => { const c = getConsensus(game.bookmakers); return (
+                        <div className="text-xs text-blue-300 mt-1">
+                          Consensus: {c.spreadAvg ? (c.spreadAvg > 0 ? '+' : '') + c.spreadAvg.toFixed(1) : '—'}
+                          {c.spreadRange && (
+                            <span className="text-[10px] text-gray-400 ml-1">({c.spreadRange[0]}–{c.spreadRange[1]})</span>
+                          )}
+                        </div>
+                      ); })()}
                     </div>
                     <div className="text-center p-3 bg-gray-800/30 rounded-lg">
                       <div className="text-xs text-gray-400 mb-1">Total</div>
@@ -351,6 +496,14 @@ const LiveOdds: React.FC<LiveOddsProps> = ({ selectedGameId }) => {
                       <div className="text-xs text-green-400">
                         O: {formatOdds(getBestOdds(game.bookmakers, 'total', 'over').value)}
                       </div>
+                      {(() => { const c = getConsensus(game.bookmakers); return (
+                        <div className="text-xs text-purple-300 mt-1">
+                          Consensus: {c.totalAvg ? c.totalAvg.toFixed(1) : '—'}
+                          {c.totalRange && (
+                            <span className="text-[10px] text-gray-400 ml-1">({c.totalRange[0]}–{c.totalRange[1]})</span>
+                          )}
+                        </div>
+                      ); })()}
                     </div>
                     <div className="text-center p-3 bg-gray-800/30 rounded-lg">
                       <div className="text-xs text-gray-400 mb-1">Moneyline</div>
@@ -360,6 +513,11 @@ const LiveOdds: React.FC<LiveOddsProps> = ({ selectedGameId }) => {
                       <div className="text-xs text-green-400">
                         Best: {formatOdds(getBestOdds(game.bookmakers, 'moneyline', 'home').value)}
                       </div>
+                      {(() => { const c = getConsensus(game.bookmakers); return (
+                        <div className="text-xs text-gray-300 mt-1">
+                          Consensus: {formatOdds(Math.round(c.mlHomeAvg))}
+                        </div>
+                      ); })()}
                     </div>
                   </div>
 

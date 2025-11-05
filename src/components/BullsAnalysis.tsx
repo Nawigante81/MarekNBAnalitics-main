@@ -25,6 +25,8 @@ interface GameAnalysis {
   location: 'home' | 'away';
   spread: number;
   total: number;
+  spreadRange?: [number, number];
+  totalRange?: [number, number];
   prediction: {
     winner: string;
     confidence: number;
@@ -53,6 +55,17 @@ const BullsAnalysis: React.FC = () => {
   const [nextGame, setNextGame] = useState<GameAnalysis | null>(null);
   const [teamStats, setTeamStats] = useState<TeamStatsUI | null>(null);
   const [loading, setLoading] = useState(true);
+  // Odds finder state
+  const [homeAbbr, setHomeAbbr] = useState<string>('CHI');
+  const [awayAbbr, setAwayAbbr] = useState<string>('');
+  const [gameDate, setGameDate] = useState<string>(() => {
+    const d = new Date();
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    return `${yyyy}-${mm}-${dd}`;
+  });
+  const [finderMsg, setFinderMsg] = useState<string>('');
   
   const apiHook = useApi();
 
@@ -62,10 +75,11 @@ const BullsAnalysis: React.FC = () => {
       
       try {
         // Fetch real Bulls data from API
-        const [bullsPlayersData, bullsAnalysisData, bullsTeamStats] = await Promise.all([
+        const [bullsPlayersData, bullsAnalysisData, bullsTeamStats, todayGames] = await Promise.all([
           apiHook.getBullsPlayers(),
           apiHook.getBullsAnalysis().catch(() => null), // Optional - fallback if analysis not available
-          apiHook.getTeamStats('CHI').catch(() => null)
+          apiHook.getTeamStats('CHI').catch(() => null),
+          apiHook.getTodayGames().catch(() => [])
         ]);
         
         // Transform Bulls players data to match Player interface
@@ -108,6 +122,65 @@ const BullsAnalysis: React.FC = () => {
           });
         }
         
+        // Try to find today's Bulls game and fetch odds
+        if (Array.isArray(todayGames) && todayGames.length > 0) {
+          const game = todayGames.find((g: any) => {
+            const home = g.homeAbbr || g.home_team_abbr || g.home_team?.abbreviation || g.home_team?.abbrev || g.homeTeam || g.home?.abbreviation || g.home;
+            const away = g.awayAbbr || g.away_team_abbr || g.visitor_team?.abbreviation || g.away_team?.abbreviation || g.awayTeam || g.away?.abbreviation || g.away;
+            return String(home).toUpperCase() === 'CHI' || String(away).toUpperCase() === 'CHI';
+          });
+
+          if (game) {
+            const homeAbbr = String(
+              game.homeAbbr || game.home_team_abbr || game.home_team?.abbreviation || game.homeTeam || game.home || ''
+            ).toUpperCase();
+            const awayAbbr = String(
+              game.awayAbbr || game.away_team_abbr || game.visitor_team?.abbreviation || game.away_team?.abbreviation || game.awayTeam || game.away || ''
+            ).toUpperCase();
+            const today = new Date();
+            const yyyy = today.getFullYear();
+            const mm = String(today.getMonth() + 1).padStart(2, '0');
+            const dd = String(today.getDate()).padStart(2, '0');
+            const dateStr = `${yyyy}-${mm}-${dd}`;
+
+            try {
+              const found = await apiHook.findOdds({ homeAbbr, awayAbbr, date: dateStr });
+              // Map found odds into Next Game panel
+              if (found && (found as any).odds && (found as any).game) {
+                const fg: any = found as any;
+                // Consensus (average) across all available bookmakers
+                const oddsArr = Array.isArray(fg.odds) ? fg.odds : [];
+                const spreads = oddsArr.map((o: any) => o?.spread?.line).filter((n: any) => typeof n === 'number');
+                const totals = oddsArr.map((o: any) => o?.total?.line).filter((n: any) => typeof n === 'number');
+                const spreadLine = spreads.length ? (spreads.reduce((a: number, b: number) => a + b, 0) / spreads.length) : 0;
+                const totalLine = totals.length ? (totals.reduce((a: number, b: number) => a + b, 0) / totals.length) : 0;
+                const spreadRange: [number, number] | undefined = spreads.length ? [Math.min(...spreads), Math.max(...spreads)] : undefined;
+                const totalRange: [number, number] | undefined = totals.length ? [Math.min(...totals), Math.max(...totals)] : undefined;
+                const isHome = homeAbbr === 'CHI';
+                setNextGame({
+                  opponent: isHome ? awayAbbr : homeAbbr,
+                  date: fg.game.startTime || 'Today',
+                  location: isHome ? 'home' : 'away',
+                  spread: spreadLine || 0,
+                  total: totalLine || 0,
+                  spreadRange,
+                  totalRange,
+                  prediction: {
+                    winner: 'Bulls',
+                    confidence: 0,
+                    ats: 'COVER',
+                    ou: 'OVER',
+                  },
+                  matchups: [],
+                });
+              }
+            } catch (e) {
+              // Non-fatal if odds lookup fails; keep existing nextGame
+              console.warn('Failed to find Bulls game odds', e);
+            }
+          }
+        }
+
         // If we got Bulls analysis data, use it; otherwise use mock data
         if (bullsAnalysisData) {
           // Use real analysis data structure here
@@ -289,7 +362,92 @@ const BullsAnalysis: React.FC = () => {
           </h2>
         </div>
 
-        <div className="p-6">
+        <div className="p-6 space-y-6">
+          {/* Quick Odds Finder for Bulls */}
+          <form
+            className="w-full glass-card p-4 flex flex-wrap items-end gap-3"
+            onSubmit={async (e) => {
+              e.preventDefault();
+              setFinderMsg('');
+              try {
+                const resp = await apiHook.findOdds({
+                  homeAbbr: homeAbbr?.toUpperCase(),
+                  awayAbbr: awayAbbr?.toUpperCase(),
+                  date: gameDate,
+                });
+                if (resp && (resp as any).game) {
+                  const fg: any = resp;
+                  // Consensus (average) across all available bookmakers
+                  const oddsArr = Array.isArray(fg.odds) ? fg.odds : [];
+                  const spreads = oddsArr.map((o: any) => o?.spread?.line).filter((n: any) => typeof n === 'number');
+                  const totals = oddsArr.map((o: any) => o?.total?.line).filter((n: any) => typeof n === 'number');
+                  const spreadAvg = spreads.length ? (spreads.reduce((a: number, b: number) => a + b, 0) / spreads.length) : 0;
+                  const totalAvg = totals.length ? (totals.reduce((a: number, b: number) => a + b, 0) / totals.length) : 0;
+                  const spreadRange: [number, number] | undefined = spreads.length ? [Math.min(...spreads), Math.max(...spreads)] : undefined;
+                  const totalRange: [number, number] | undefined = totals.length ? [Math.min(...totals), Math.max(...totals)] : undefined;
+                  const bullsIsHome = homeAbbr.toUpperCase() === 'CHI';
+                  setNextGame({
+                    opponent: bullsIsHome ? awayAbbr.toUpperCase() : homeAbbr.toUpperCase(),
+                    date: (fg.game as any).startTime || gameDate,
+                    location: bullsIsHome ? 'home' as const : 'away' as const,
+                    spread: spreadAvg,
+                    total: totalAvg,
+                    spreadRange,
+                    totalRange,
+                    prediction: { winner: 'Bulls', confidence: 0, ats: 'COVER', ou: 'OVER' },
+                    matchups: [],
+                  });
+                  setFinderMsg('Zaktualizowano mecz i kursy.');
+                } else {
+                  setFinderMsg('Nie znaleziono meczu dla podanych parametrów.');
+                }
+              } catch (err) {
+                console.error('Find odds (Bulls) error:', err);
+                setFinderMsg('Błąd podczas wyszukiwania kursów.');
+              }
+            }}
+            aria-label="Bulls odds finder"
+          >
+            <div className="flex flex-col">
+              <label className="text-xs text-gray-400" htmlFor="bulls-home">Home</label>
+              <input
+                id="bulls-home"
+                value={homeAbbr}
+                onChange={(e) => setHomeAbbr(e.target.value)}
+                placeholder="CHI"
+                title="Home team abbreviation"
+                aria-label="Home team abbreviation"
+                className="px-2 py-1 rounded bg-gray-800/50 border border-gray-700/50 text-sm"
+              />
+            </div>
+            <div className="flex flex-col">
+              <label className="text-xs text-gray-400" htmlFor="bulls-away">Away</label>
+              <input
+                id="bulls-away"
+                value={awayAbbr}
+                onChange={(e) => setAwayAbbr(e.target.value)}
+                placeholder="OPP (e.g. LAL)"
+                title="Away team abbreviation"
+                aria-label="Away team abbreviation"
+                className="px-2 py-1 rounded bg-gray-800/50 border border-gray-700/50 text-sm"
+              />
+            </div>
+            <div className="flex flex-col">
+              <label className="text-xs text-gray-400" htmlFor="bulls-date">Date</label>
+              <input
+                id="bulls-date"
+                type="date"
+                value={gameDate}
+                onChange={(e) => setGameDate(e.target.value)}
+                title="Game date"
+                aria-label="Game date"
+                className="px-2 py-1 rounded bg-gray-800/50 border border-gray-700/50 text-sm"
+              />
+            </div>
+            <button type="submit" className="glass-card px-3 py-1 text-sm">Find Odds</button>
+            {finderMsg && <span className="text-xs text-gray-400 ml-2">{finderMsg}</span>}
+          </form>
+
           <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
             <div className="text-center">
               <div className="text-2xl font-bold text-white">{teamStats?.record.wins}-{teamStats?.record.losses}</div>
@@ -385,9 +543,15 @@ const BullsAnalysis: React.FC = () => {
                   <div className="text-center mb-6">
                     <div className="text-lg font-bold text-white mb-1">vs {nextGame.opponent}</div>
                     <div className="text-gray-400 mb-2">{nextGame.date} • {nextGame.location === 'home' ? 'Home' : 'Away'}</div>
-                    <div className="flex justify-center space-x-4 text-sm">
-                      <span className="text-blue-400">Spread: {nextGame.spread > 0 ? '+' : ''}{nextGame.spread}</span>
-                      <span className="text-purple-400">Total: {nextGame.total}</span>
+                    <div className="flex flex-col items-center space-y-1 text-sm">
+                      <span className="text-blue-400">Consensus Spread: {nextGame.spread > 0 ? '+' : ''}{nextGame.spread.toFixed(1)}</span>
+                      {nextGame.spreadRange && (
+                        <span className="text-xs text-blue-300/80">Range: {nextGame.spreadRange[0]} to {nextGame.spreadRange[1]}</span>
+                      )}
+                      <span className="text-purple-400">Consensus Total: {nextGame.total.toFixed(1)}</span>
+                      {nextGame.totalRange && (
+                        <span className="text-xs text-purple-300/80">Range: {nextGame.totalRange[0]} to {nextGame.totalRange[1]}</span>
+                      )}
                     </div>
                   </div>
 

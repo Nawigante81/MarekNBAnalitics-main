@@ -62,25 +62,44 @@ async def save_teams(supabase: Client, teams: list):
 
 
 async def get_nba_odds():
-    """Fetch NBA odds from The Odds API"""
-    api_key = os.getenv("ODDS_API_KEY", "345c1ad37d7b391ec285a93579e7fe80")
+    """Fetch NBA odds from The Odds API (normalized)."""
+    api_key = os.getenv("ODDS_API_KEY")
 
-    async with httpx.AsyncClient() as client:
-        url = "https://api.the-odds-api.com/v4/sports/basketball_nba/events"
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        # Use odds endpoint to include bookmakers and markets
+        url = "https://api.the-odds-api.com/v4/sports/basketball_nba/odds"
         params = {
-            "apiKey": api_key,
+            "apiKey": api_key or "",
             "regions": "us",
-            "markets": "h2h,spread,totals"
+            "markets": "h2h,spreads,totals",
+            "oddsFormat": "american",
+            "dateFormat": "iso",
         }
 
         response = await client.get(url, params=params)
         response.raise_for_status()
-        return response.json()
+        data = response.json()
+        # Normalize: always return a dict with 'events' key for downstream code
+        if isinstance(data, list):
+            return {"events": data}
+        if isinstance(data, dict):
+            # Some providers may already wrap; use common keys
+            if "events" in data:
+                return data
+            for key in ("data", "matches", "games", "response"):
+                if isinstance(data.get(key), list):
+                    return {"events": data[key]}
+        return {"events": []}
 
 
-async def process_odds_data(supabase: Client, odds_data: dict):
-    """Process and save odds data to Supabase"""
-    events = odds_data.get("events", [])
+async def process_odds_data(supabase: Client, odds_data):
+    """Process and save odds data to Supabase. Accepts list or dict."""
+    if isinstance(odds_data, list):
+        events = odds_data
+    elif isinstance(odds_data, dict):
+        events = odds_data.get("events", [])
+    else:
+        events = []
 
     for event in events:
         try:
@@ -127,7 +146,7 @@ async def process_odds_data(supabase: Client, odds_data: dict):
                                 "price": outcome.get("price"),
                             })
 
-                    elif market_key == "spread":
+                    elif market_key == "spreads":
                         for outcome in outcomes:
                             odds_records.append({
                                 "game_id": game_id,
@@ -178,7 +197,9 @@ async def scrape_all_data(supabase: Client):
         await save_teams(supabase, teams)
 
         odds_data = await get_nba_odds()
-        print(f"Fetched odds for {len(odds_data.get('events', []))} games")
+        # Support both list and dict return shapes
+        events = odds_data if isinstance(odds_data, list) else odds_data.get('events', [])
+        print(f"Fetched odds for {len(events)} games")
         await process_odds_data(supabase, odds_data)
 
         print(f"[{datetime.now().isoformat()}] Scrape completed successfully")
@@ -434,7 +455,8 @@ async def scrape_all_data(supabase: Client, include_rosters: bool = True):
 
         # Scrape odds
         odds_data = await get_nba_odds()
-        print(f"Fetched odds for {len(odds_data.get('events', []))} games")
+        events = odds_data if isinstance(odds_data, list) else odds_data.get('events', [])
+        print(f"Fetched odds for {len(events)} games")
         await process_odds_data(supabase, odds_data)
         
         # Scrape rosters if requested

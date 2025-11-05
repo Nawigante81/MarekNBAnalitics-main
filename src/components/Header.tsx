@@ -56,6 +56,7 @@ const Header: React.FC<HeaderProps> = ({ activeSection, lastUpdate, onRefresh })
             onClick={onRefresh}
             className="glass-card p-2 hover:bg-white/10 transition-colors duration-200"
             title="Refresh Data"
+            aria-label="Refresh data"
           >
             <RefreshCw className="w-5 h-5 text-gray-400 hover:text-white" />
           </button>
@@ -69,7 +70,7 @@ const Header: React.FC<HeaderProps> = ({ activeSection, lastUpdate, onRefresh })
               setShowProfile(false);
             }}
             aria-haspopup="true"
-            aria-expanded={showNotifications ? "true" : "false"}
+            aria-expanded={showNotifications}
             title="Notifications"
           >
             <Bell className="w-5 h-5 text-gray-400 hover:text-white" />
@@ -114,7 +115,7 @@ const Header: React.FC<HeaderProps> = ({ activeSection, lastUpdate, onRefresh })
               setShowProfile(false);
             }}
             aria-haspopup="true"
-            aria-expanded={showSettings ? "true" : "false"}
+            aria-expanded={showSettings}
             title="Settings"
           >
             <Settings className="w-5 h-5 text-gray-400 hover:text-white" />
@@ -159,7 +160,7 @@ const Header: React.FC<HeaderProps> = ({ activeSection, lastUpdate, onRefresh })
               setShowSettings(false);
             }}
             aria-haspopup="true"
-            aria-expanded={showProfile ? "true" : "false"}
+            aria-expanded={showProfile}
             title="Profile"
           >
             <Users className="w-5 h-5 text-gray-400" />

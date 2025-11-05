@@ -112,7 +112,7 @@ function App() {
             onRefresh={() => setLastUpdate(new Date())}
           />
           
-          <main className="flex-1 overflow-auto p-6 pb-0">
+          <main id="main-content" role="main" className="flex-1 overflow-auto p-6 pb-0">
             {renderContent()}
           </main>
           

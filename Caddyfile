@@ -2,7 +2,7 @@
 # This file configures Caddy as reverse proxy for the NBA Analytics application
 
 # Replace with your actual domain
-nba-analytics.yourdomain.com {
+nbanalyzer.geracid.uk {
     # Automatic HTTPS with Let's Encrypt
     
     # Security headers
@@ -29,9 +29,9 @@ nba-analytics.yourdomain.com {
         }
     }
 
-    # Backend API proxy
+    # Backend API proxy (directly to backend service in docker network)
     handle /api/* {
-        reverse_proxy localhost:8000 {
+        reverse_proxy backend:8000 {
             # Health check for backend
             health_uri /health
             health_interval 30s
@@ -41,33 +41,16 @@ nba-analytics.yourdomain.com {
             # lb_policy round_robin
             
             # Headers
-            header_up Host {upstream_hostport}
+            header_up Host {host}
             header_up X-Real-IP {remote_host}
             header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
         }
     }
 
-    # WebSocket support for development/hot reload
-    handle /ws {
-        reverse_proxy localhost:5173
-    }
-
-    # Static files and frontend SPA
+    # Frontend (proxy to nginx inside frontend container)
     handle {
-        # Try to serve static files first, then fallback to index.html for SPA
-        try_files {path} /index.html
-        
-        # Serve from built frontend (production)
-        root * /var/www/nba-analytics/dist
-        file_server
-        
-        # Cache static assets
-        @static {
-            path *.js *.css *.png *.jpg *.jpeg *.gif *.ico *.svg *.woff *.woff2 *.ttf *.eot
-        }
-        header @static {
-            Cache-Control "public, max-age=31536000, immutable"
-        }
+        reverse_proxy frontend:8080
     }
 
     # Logging
@@ -95,20 +78,7 @@ nba-analytics.yourdomain.com {
     }
 }
 
-# Development/local access (HTTP only)
-localhost:80, localhost {
-    # Backend API
-    handle /api/* {
-        reverse_proxy localhost:8000
-    }
-    
-    # Frontend
-    handle {
-        reverse_proxy localhost:5173
-    }
-}
-
 # Alternative domain (www redirect)
-www.nba-analytics.yourdomain.com {
-    redir https://nba-analytics.yourdomain.com{uri} permanent
+www.nbanalyzer.geracid.uk {
+    redir https://nbanalyzer.geracid.uk{uri} permanent
 }

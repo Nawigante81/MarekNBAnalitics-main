@@ -30,7 +30,7 @@ const Sidebar: React.FC<SidebarProps> = ({ items, activeSection, onSectionChange
       </div>
 
       {/* Navigation */}
-      <nav className="flex-1 p-4">
+      <nav className="flex-1 p-4" aria-label="Main">
         <ul className="space-y-2">
           {items.map((item) => {
             const Icon = item.icon;
@@ -45,6 +45,7 @@ const Sidebar: React.FC<SidebarProps> = ({ items, activeSection, onSectionChange
                       ? 'bg-blue-600/20 text-blue-400 border border-blue-400/20 shadow-lg'
                       : 'text-gray-300 hover:text-white hover:bg-gray-800/50'
                   }`}
+                  aria-current={isActive ? 'page' : undefined}
                 >
                   <Icon className={`w-5 h-5 ${isActive ? 'text-blue-400' : 'text-gray-400'}`} />
                   <span className="font-medium">{item.label}</span>
