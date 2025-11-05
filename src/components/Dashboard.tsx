@@ -87,17 +87,80 @@ const Dashboard: React.FC<DashboardProps> = ({ onViewOdds }) => {
         awayOdds: 0, // Will be populated from odds
       }));
 
-      setTodayGames(transformedGames);
       setTeamsRaw(teamsData || []);
 
+      // Helper: resolve abbreviation from any team label
+      const getAbbr = (label: string): string | undefined => {
+        if (!label) return undefined;
+        const direct = (teamsData || []).find(t => t.abbreviation?.toLowerCase() === label.toLowerCase());
+        if (direct) return direct.abbreviation;
+        const exact = (teamsData || []).find(t => (t.full_name || t.name || '').toLowerCase() === label.toLowerCase());
+        if (exact) return exact.abbreviation;
+        const contains = (teamsData || []).find(t => (t.full_name || t.name || '').toLowerCase().includes(label.toLowerCase()));
+        return contains?.abbreviation;
+      };
+
+      // Optionally enrich odds for each game (best-effort)
+      const enrichedGames: GameData[] = await Promise.all(
+        transformedGames.map(async (g) => {
+          try {
+            const homeAbbr = getAbbr(g.homeTeam);
+            const awayAbbr = getAbbr(g.awayTeam);
+            if (!homeAbbr || !awayAbbr) return g;
+            const found = await apiHook.findOdds({ homeAbbr, awayAbbr });
+            const first = Array.isArray(found?.odds) && found.odds.length > 0 ? found.odds[0] : undefined;
+            if (!first) return g;
+            const spread = typeof first?.spread?.line === 'number' ? first.spread.line : g.spread;
+            const total = typeof first?.total?.line === 'number' ? first.total.line : g.total;
+            const homeOdds = typeof first?.moneyline?.home === 'number' ? first.moneyline.home : g.homeOdds;
+            const awayOdds = typeof first?.moneyline?.away === 'number' ? first.moneyline.away : g.awayOdds;
+            return { ...g, spread, total, homeOdds, awayOdds };
+          } catch (e) {
+            console.warn('Odds enrichment failed for game', g.id, e);
+            return g;
+          }
+        })
+      );
+
+      setTodayGames(enrichedGames);
+
       // Transform teams data for focus teams (mock data if no real analysis yet)
-      const focusTeamsList: TeamStats[] = (teamsData || []).slice(0, 5).map((team: ApiTeam) => ({
-        team: team.name || team.abbreviation,
-        record: '0-0', // Placeholder - would come from analysis API
-        ats: '0-0', // Placeholder - would come from analysis API
-        ou: '0-0', // Placeholder - would come from analysis API
-        trend: 'neutral',
-      }));
+      const focusSeeds = (teamsData || []).slice(0, 5);
+      const focusTeamsList: TeamStats[] = await Promise.all(
+        focusSeeds.map(async (team: ApiTeam) => {
+          try {
+            const stats = await apiHook.getTeamStats(team.abbreviation);
+            const wins = stats?.season_stats?.wins ?? 0;
+            const losses = stats?.season_stats?.losses ?? 0;
+            const record = `${wins}-${losses}`;
+            const ats = (stats as any)?.betting_stats?.ats_record ?? 'N/A';
+            const ou = (stats as any)?.betting_stats?.ou_record ?? 'N/A';
+            const last10 = stats?.recent_form?.last_10;
+            let trend: 'up' | 'down' | 'neutral' = 'neutral';
+            if (last10 && /\d+-\d+/.test(last10)) {
+              const [w, l] = last10.split('-').map(Number);
+              if (w > l) trend = 'up';
+              else if (w < l) trend = 'down';
+            }
+            return {
+              team: team.name || team.abbreviation,
+              record,
+              ats,
+              ou,
+              trend,
+            } as TeamStats;
+          } catch (e) {
+            console.warn('Failed to load team stats for', team.abbreviation, e);
+            return {
+              team: team.name || team.abbreviation,
+              record: '0-0',
+              ats: 'N/A',
+              ou: 'N/A',
+              trend: 'neutral',
+            } as TeamStats;
+          }
+        })
+      );
 
       setFocusTeams(focusTeamsList);
     } catch (error) {

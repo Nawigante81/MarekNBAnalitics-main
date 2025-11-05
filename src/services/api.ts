@@ -53,7 +53,7 @@ export interface TeamSeasonStats {
 export interface TeamStatsResponse extends TeamSummary {
   season_stats: TeamSeasonStats;
   recent_form?: { last_10?: string };
-  betting_stats?: { avg_total?: number };
+  betting_stats?: { avg_total?: number; ats_record?: string; ou_record?: string; ats_percentage?: number };
   last_updated?: string;
 }
 
