@@ -46,6 +46,15 @@ function App() {
   ];
   const [isLoading, setIsLoading] = useState(true);
   const [lastUpdate, setLastUpdate] = useState<Date>(new Date());
+  // App-level settings persisted to localStorage (manual refresh only)
+  const [liveAnimationsEnabled, setLiveAnimationsEnabled] = useState<boolean>(() => {
+    const v = localStorage.getItem('settings.liveAnimations');
+    return v === null ? true : v === 'true';
+  });
+  const [notificationsEnabled, setNotificationsEnabled] = useState<boolean>(() => {
+    const v = localStorage.getItem('settings.notificationsEnabled');
+    return v === null ? true : v === 'true';
+  });
 
   useEffect(() => {
     // Simulate initial data loading
@@ -55,13 +64,13 @@ function App() {
     return () => clearTimeout(timer);
   }, []);
 
+  // Persist settings
   useEffect(() => {
-    // Auto-refresh data every 30 seconds (aligns with tests and Live Odds polling cadence)
-    const interval = setInterval(() => {
-      setLastUpdate(new Date());
-    }, 30 * 1000);
-    return () => clearInterval(interval);
-  }, []);
+    localStorage.setItem('settings.liveAnimations', String(liveAnimationsEnabled));
+  }, [liveAnimationsEnabled]);
+  useEffect(() => {
+    localStorage.setItem('settings.notificationsEnabled', String(notificationsEnabled));
+  }, [notificationsEnabled]);
 
   
 
@@ -144,6 +153,14 @@ function App() {
             activeSection={activeSection}
             lastUpdate={lastUpdate}
             onRefresh={() => setLastUpdate(new Date())}
+            settings={{
+              liveAnimationsEnabled,
+              notificationsEnabled,
+            }}
+            onToggleSetting={(key, value) => {
+              if (key === 'liveAnimationsEnabled') setLiveAnimationsEnabled(value);
+              if (key === 'notificationsEnabled') setNotificationsEnabled(value);
+            }}
           />
           
           <main id="main-content" role="main" className="flex-1 overflow-auto p-6 pb-0">
@@ -156,10 +173,10 @@ function App() {
       </div>
 
       {/* Status Indicator */}
-      <div className="fixed bottom-20 right-4 z-50">
+  <div className="fixed bottom-20 right-4 z-[99990]">
         <div className="glass-card px-4 py-2 flex items-center space-x-2">
-          <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div>
-          <span className="text-sm text-gray-300">Live Data</span>
+          <div className={`w-2 h-2 bg-green-400 rounded-full ${(Date.now() - lastUpdate.getTime() < 3000 && liveAnimationsEnabled) ? 'animate-pulse' : ''}`}></div>
+          <span className="text-sm text-gray-200">Live Data</span>
         </div>
       </div>
     </div>

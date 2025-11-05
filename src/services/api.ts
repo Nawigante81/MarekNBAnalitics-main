@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
 // API Service Layer for NBA Analytics Frontend
 // Handles all communication with the FastAPI backend
 

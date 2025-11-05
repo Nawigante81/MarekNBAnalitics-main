@@ -1,7 +1,6 @@
 /// <reference types="vite/client" />
-/// <reference types="react" />
-/// <reference types="react-dom" />
 
+// Keep TypeScript happy in tools that require explicit jsx-runtime typing
 declare module 'react/jsx-runtime' {
   export * from 'react/jsx-runtime';
 }

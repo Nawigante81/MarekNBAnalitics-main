@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
 import React, { useState, useEffect } from 'react';
 import { Target, TrendingUp, TrendingDown, Users, Activity, Clock, AlertTriangle } from 'lucide-react';
 import { useApi } from '../services/api';

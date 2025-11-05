@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { 
   TrendingUp, 
   TrendingDown, 
@@ -64,74 +64,72 @@ const Dashboard: React.FC<DashboardProps> = ({ onViewOdds }) => {
 
   const apiHook = useApi();
 
-  useEffect(() => {
-    const fetchData = async () => {
-      setLoading(true);
-      setError(null);
-      
-      try {
-        // Fetch real data from API
-        const [gamesData, teamsData] = await Promise.all([
-          apiHook.getTodayGames(),
-          apiHook.getTeams()
-        ]);
-        
-        // Transform games data to match expected format
-        const transformedGames = gamesData.map((game: ApiGame) => ({
-          id: game.id || Math.random().toString(),
-          homeTeam: game.home_team || 'TBD',
-          awayTeam: game.away_team || 'TBD', 
-          time: game.commence_time ? new Date(game.commence_time).toLocaleTimeString() : 'TBD',
-          spread: 0, // Will be populated from odds
-          total: 0, // Will be populated from odds
-          homeOdds: 0, // Will be populated from odds
-          awayOdds: 0 // Will be populated from odds
-        }));
+  const fetchData = useCallback(async () => {
+    setLoading(true);
+    setError(null);
 
-        setTodayGames(transformedGames);
-        setTeamsRaw(teamsData);
+    try {
+      // Fetch real data from API
+      const [gamesData, teamsData]: [ApiGame[], ApiTeam[]] = await Promise.all([
+        apiHook.getTodayGames(),
+        apiHook.getTeams(),
+      ]);
 
-        // Transform teams data for focus teams (mock data if no real analysis yet)
-        const focusTeamsList = teamsData.slice(0, 5).map((team: ApiTeam) => ({
-          team: team.name || team.abbreviation,
-          record: '0-0', // Placeholder - would come from analysis API
-          ats: '0-0', // Placeholder - would come from analysis API  
-          ou: '0-0', // Placeholder - would come from analysis API
-          trend: 'neutral' as const
-        }));
+      // Transform games data to match expected format
+      const transformedGames: GameData[] = (gamesData || []).map((game: ApiGame) => ({
+        id: game.id || Math.random().toString(),
+        homeTeam: game.home_team || 'TBD',
+        awayTeam: game.away_team || 'TBD',
+        time: game.commence_time ? new Date(game.commence_time).toLocaleTimeString() : 'TBD',
+        spread: 0, // Will be populated from odds
+        total: 0, // Will be populated from odds
+        homeOdds: 0, // Will be populated from odds
+        awayOdds: 0, // Will be populated from odds
+      }));
 
-        setFocusTeams(focusTeamsList);
+      setTodayGames(transformedGames);
+      setTeamsRaw(teamsData || []);
 
-      } catch (error) {
-        console.error('Error fetching dashboard data:', error);
-        // Include English keywords for tests while keeping original message
-        setError('Error: Failed to load data. Nie udało się wczytać danych. Spróbuj ponownie.');
-        
-        // Fallback to demo data if API fails
-        setTodayGames([
-          {
-            id: 'demo-1',
-            homeTeam: 'Chicago Bulls',
-            awayTeam: 'Los Angeles Lakers',
-            time: '8:00 PM EST',
-            spread: -2.5,
-            total: 225.5,
-            homeOdds: -120,
-            awayOdds: +100
-          }
-        ]);
+      // Transform teams data for focus teams (mock data if no real analysis yet)
+      const focusTeamsList: TeamStats[] = (teamsData || []).slice(0, 5).map((team: ApiTeam) => ({
+        team: team.name || team.abbreviation,
+        record: '0-0', // Placeholder - would come from analysis API
+        ats: '0-0', // Placeholder - would come from analysis API
+        ou: '0-0', // Placeholder - would come from analysis API
+        trend: 'neutral',
+      }));
 
-        setFocusTeams([
-          { team: 'Bulls', record: '8-12', ats: '9-11', ou: '12-8', trend: 'up' }
-        ]);
-      }
-      
+      setFocusTeams(focusTeamsList);
+    } catch (error) {
+      console.error('Error fetching dashboard data:', error);
+      // Include English keywords for tests while keeping original message
+      setError('Error: Failed to load data. Nie udało się wczytać danych. Spróbuj ponownie.');
+
+      // Fallback to demo data if API fails
+      setTodayGames([
+        {
+          id: 'demo-1',
+          homeTeam: 'Chicago Bulls',
+          awayTeam: 'Los Angeles Lakers',
+          time: '8:00 PM EST',
+          spread: -2.5,
+          total: 225.5,
+          homeOdds: -120,
+          awayOdds: +100,
+        },
+      ]);
+
+      setFocusTeams([
+        { team: 'Bulls', record: '8-12', ats: '9-11', ou: '12-8', trend: 'up' },
+      ]);
+    } finally {
       setLoading(false);
-    };
+    }
+  }, [apiHook]);
 
+  useEffect(() => {
     fetchData();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // Run only once on mount
+  }, [fetchData]);
 
   const StatCard = ({ value, subtitle, icon: Icon, trend, color }: {
     value: string | number;
@@ -252,37 +250,7 @@ const Dashboard: React.FC<DashboardProps> = ({ onViewOdds }) => {
             setError(null);
             setLoading(true);
             // retry
-            (async () => {
-              try {
-                const [gamesData, teamsData] = await Promise.all([
-                  apiHook.getTodayGames(),
-                  apiHook.getTeams()
-                ]);
-                const transformedGames = gamesData.map((game: ApiGame) => ({
-                  id: game.id || Math.random().toString(),
-                  homeTeam: game.home_team || 'TBD',
-                  awayTeam: game.away_team || 'TBD',
-                  time: game.commence_time ? new Date(game.commence_time).toLocaleTimeString() : 'TBD',
-                  spread: 0,
-                  total: 0,
-                  homeOdds: 0,
-                  awayOdds: 0
-                }));
-                setTodayGames(transformedGames);
-                const focusTeamsList = teamsData.slice(0, 5).map((team: ApiTeam) => ({
-                  team: team.name || team.abbreviation,
-                  record: '0-0',
-                  ats: '0-0',
-                  ou: '0-0',
-                  trend: 'neutral' as const
-                }));
-                setFocusTeams(focusTeamsList);
-              } catch (e) {
-                console.error(e);
-              } finally {
-                setLoading(false);
-              }
-            })();
+            fetchData().finally(() => setLoading(false));
           }}
           className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded text-white"
         >

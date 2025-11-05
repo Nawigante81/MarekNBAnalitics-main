@@ -36,12 +36,14 @@ const Footer: React.FC = () => {
       try {
         // Fetch today's games to check for Bulls and Lakers
         const todayGames = await apiHook.getTodayGames();
+        type TodayGame = { home_team?: string; away_team?: string; commence_time?: string };
+        const tg = (todayGames || []) as TodayGame[];
         
         // Check for Bulls and Lakers games tonight using today's schedule
-        const bullsGameTonight = todayGames.find((game: any) => 
+        const bullsGameTonight = tg.find((game) => 
           (game.home_team || '').includes('Bulls') || (game.away_team || '').includes('Bulls')
         );
-        const lakersGameTonight = todayGames.find((game: any) => 
+        const lakersGameTonight = tg.find((game) => 
           (game.home_team || '').includes('Lakers') || (game.away_team || '').includes('Lakers')
         );
 
@@ -50,7 +52,7 @@ const Footer: React.FC = () => {
           const isHome = (bullsGameTonight.home_team || '').includes('Bulls');
           const when = bullsGameTonight.commence_time ? new Date(bullsGameTonight.commence_time) : null;
           setNextBullsGame({
-            opponent: isHome ? bullsGameTonight.away_team : bullsGameTonight.home_team,
+            opponent: (isHome ? bullsGameTonight.away_team : bullsGameTonight.home_team) || '-',
             date: 'Tonight',
             time: when ? when.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '-',
             location: isHome ? 'home' : 'away',
@@ -59,7 +61,7 @@ const Footer: React.FC = () => {
           });
         } else {
           const next = await api.teams.getNextGame('CHI');
-          if ((next as any).next_game === null || !next.commence_time) {
+          if (!next.commence_time) {
             setNextBullsGame(null);
           } else {
             const when = new Date(next.commence_time as string);
@@ -81,7 +83,7 @@ const Footer: React.FC = () => {
           const isHome = (lakersGameTonight.home_team || '').includes('Lakers');
           const when = lakersGameTonight.commence_time ? new Date(lakersGameTonight.commence_time) : null;
           setLakersTonight({
-            opponent: isHome ? lakersGameTonight.away_team : lakersGameTonight.home_team,
+            opponent: (isHome ? lakersGameTonight.away_team : lakersGameTonight.home_team) || '-',
             date: 'Tonight',
             time: when ? when.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '-',
             location: isHome ? 'home' : 'away',
@@ -94,7 +96,7 @@ const Footer: React.FC = () => {
 
         // Last Bulls game (real)
         const last = await api.teams.getLastGame('CHI');
-        if (!(last as any).last_game && last.date) {
+        if (last.date) {
           setLastBullsGame({
             opponent: last.opponent || '-',
             result: (last.result as 'W' | 'L') || 'W',

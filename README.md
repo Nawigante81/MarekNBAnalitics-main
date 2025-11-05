@@ -325,6 +325,12 @@ SELECT * FROM odds WHERE game_id = 'xxxxx' AND market_type = 'spread';
 - Check server time synchronization
 - Review scheduler logs for job execution
 
+### 401/404 from external NBA API (balldontlie)
+
+- Symptom in logs: `ERROR:external_apis:Error fetching teams: 401` or frontend 404s on `/api/teams/{abbr}/timeseries`.
+- Fix: set `BALLDONTLIE_API_KEY` in `backend/.env` (recommended). Then restart the backend.
+- Behavior without a key: backend degrades gracefully — affected endpoints now return HTTP 200 with empty data instead of errors and locally filter games when possible. Some visuals (e.g., team time series) may be blank until the key is configured.
+
 ## Performance Considerations
 
 - **Scraper Interval**: 6 hours balances freshness vs. API rate limits
@@ -360,6 +366,7 @@ SELECT * FROM odds WHERE game_id = 'xxxxx' AND market_type = 'spread';
 ## Support & Maintenance
 
 For issues or questions:
+
 1. Check logs: `docker compose logs backend`
 2. Verify API connectivity manually
 3. Confirm Supabase schema matches expectations

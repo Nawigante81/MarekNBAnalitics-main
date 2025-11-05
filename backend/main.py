@@ -1930,42 +1930,64 @@ async def get_team_analysis(team_abbrev: str):
 async def get_team_timeseries(team_abbrev: str, metric: str = "net", games: int = 20):
     """Return a simple timeseries for a team from recent games.
     metric: one of ppg|papg|net|margin. Returns array of {date, ppg, papg, net, margin}.
+    - Resilient to external API outages: returns 200 with an empty series when upstream fails.
     """
     try:
         abbr = team_abbrev.upper()
-        games = max(5, min(int(games or 20), 60))
+        target_n = max(5, min(int(games or 20), 60))
+
+        # Try to resolve team; if external API fails/returns empty, construct a minimal placeholder
         teams = await fetch_nba_teams()
-        team = next((t for t in teams if (t.get('abbreviation') or '').upper() == abbr), None)
-        if not team:
-            raise HTTPException(status_code=404, detail=f"Team '{abbr}' not found")
+        team = next((t for t in teams if (t.get("abbreviation") or "").upper() == abbr), None)
+        team_id = str(team.get("id")) if isinstance(team, dict) and team.get("id") is not None else None
+
         end_date = datetime.now().date()
         start_date = end_date - timedelta(days=120)
-        raw = await fetch_nba_games(start_date=start_date.isoformat(), end_date=end_date.isoformat(), team_id=str(team.get('id')))
-        raw = [g for g in raw if g.get('home_team_score') is not None and g.get('visitor_team_score') is not None]
-        raw.sort(key=lambda g: g.get('commence_time', ''))
-        series = []
-        for g in raw[-games:]:
-            is_home = (g.get('home_team_abbreviation') or '') == abbr
-            hs = g.get('home_team_score') or 0
-            as_ = g.get('visitor_team_score') or 0
+
+        # If we don't have team_id, fetch a broader slice and filter locally
+        raw = await fetch_nba_games(
+            start_date=start_date.isoformat(),
+            end_date=end_date.isoformat(),
+            team_id=team_id,
+        )
+
+        # Filter to requested team by abbreviation in case team_id wasn't available
+        raw = [
+            g for g in (raw or [])
+            if g.get("home_team_score") is not None
+            and g.get("visitor_team_score") is not None
+            and (
+                (g.get("home_team_abbreviation") or "").upper() == abbr
+                or (g.get("away_team_abbreviation") or "").upper() == abbr
+            )
+        ]
+        raw.sort(key=lambda g: g.get("commence_time", ""))
+
+        series: list[dict] = []
+        for g in raw[-target_n:]:
+            is_home = (g.get("home_team_abbreviation") or "").upper() == abbr
+            hs = g.get("home_team_score") or 0
+            as_ = g.get("visitor_team_score") or 0
             team_score = hs if is_home else as_
             opp_score = as_ if is_home else hs
             ppg = float(team_score)
             papg = float(opp_score)
             net = round(ppg - papg, 1)
             series.append({
-                'date': (g.get('commence_time') or '')[:10],
-                'ppg': ppg,
-                'papg': papg,
-                'net': net,
-                'margin': team_score - opp_score,
+                "date": (g.get("commence_time") or "")[:10],
+                "ppg": ppg,
+                "papg": papg,
+                "net": net,
+                "margin": team_score - opp_score,
             })
-        return {'team': abbr, 'series': series, 'count': len(series)}
+
+        return {"team": abbr, "series": series, "count": len(series), "metric": metric}
     except HTTPException:
         raise
     except Exception as e:
+        # Be graceful on upstream failures: return empty series with 200 to avoid breaking UI
         logger.error(f"Error building team timeseries for {team_abbrev}: {e}")
-        raise HTTPException(status_code=500, detail="Failed to fetch team timeseries")
+        return {"team": team_abbrev.upper(), "series": [], "count": 0, "metric": metric, "note": "external API unavailable"}
 
 
 @app.get("/api/teams/{team_abbrev}/next-game")
@@ -1977,13 +1999,12 @@ async def get_team_next_game(team_abbrev: str):
         abbr = team_abbrev.upper()
         teams = await fetch_nba_teams()
         team = next((t for t in teams if (t.get('abbreviation') or '').upper() == abbr), None)
-        if not team:
-            raise HTTPException(status_code=404, detail=f"Team '{abbr}' not found")
+        team_id = str(team.get('id')) if isinstance(team, dict) and team.get('id') is not None else None
 
         now = datetime.now()
         start_date = now.date().isoformat()
         end_date = (now.date() + timedelta(days=21)).isoformat()
-        games = await fetch_nba_games(start_date=start_date, end_date=end_date, team_id=str(team.get('id')))
+        games = await fetch_nba_games(start_date=start_date, end_date=end_date, team_id=team_id)
         # future games only
         fut = []
         for g in games:
@@ -1994,17 +2015,21 @@ async def get_team_next_game(team_abbrev: str):
                 when = datetime.fromisoformat(ct.replace('Z', '+00:00'))
             except Exception:
                 when = datetime.fromisoformat(ct[:19]) if len(ct) >= 19 else now
-            if when >= now:
+            # Keep only this team's games (filter locally if team_id was unavailable)
+            if when >= now and (
+                (g.get('home_team_abbreviation') or '').upper() == abbr
+                or (g.get('away_team_abbreviation') or '').upper() == abbr
+            ):
                 fut.append((when, g))
         if not fut:
-            return {"team": team.get('full_name') or abbr, "abbr": abbr, "next_game": None}
+            return {"team": (team.get('full_name') if isinstance(team, dict) else abbr) or abbr, "abbr": abbr, "next_game": None}
         fut.sort(key=lambda x: x[0])
         when, g = fut[0]
         is_home = (g.get('home_team_abbreviation') or '').upper() == abbr
         opp_abbr = (g.get('away_team_abbreviation') if is_home else g.get('home_team_abbreviation')) or ''
         opp_full = (g.get('away_team') if is_home else g.get('home_team')) or opp_abbr
         return {
-            "team": team.get('full_name') or abbr,
+            "team": (team.get('full_name') if isinstance(team, dict) else abbr) or abbr,
             "abbr": abbr,
             "opponent": opp_full,
             "opponent_abbr": opp_abbr,
@@ -2027,13 +2052,12 @@ async def get_team_last_game(team_abbrev: str):
         abbr = team_abbrev.upper()
         teams = await fetch_nba_teams()
         team = next((t for t in teams if (t.get('abbreviation') or '').upper() == abbr), None)
-        if not team:
-            raise HTTPException(status_code=404, detail=f"Team '{abbr}' not found")
+        team_id = str(team.get('id')) if isinstance(team, dict) and team.get('id') is not None else None
 
         now = datetime.now()
         start_date = (now.date() - timedelta(days=60)).isoformat()
         end_date = now.date().isoformat()
-        games = await fetch_nba_games(start_date=start_date, end_date=end_date, team_id=str(team.get('id')))
+        games = await fetch_nba_games(start_date=start_date, end_date=end_date, team_id=team_id)
         # past games with scores
         past = []
         for g in games:
@@ -2044,10 +2068,18 @@ async def get_team_last_game(team_abbrev: str):
                 when = datetime.fromisoformat(ct.replace('Z', '+00:00'))
             except Exception:
                 when = datetime.fromisoformat(ct[:19]) if len(ct) >= 19 else now
-            if when <= now and g.get('home_team_score') is not None and g.get('visitor_team_score') is not None:
+            if (
+                when <= now
+                and g.get('home_team_score') is not None
+                and g.get('visitor_team_score') is not None
+                and (
+                    (g.get('home_team_abbreviation') or '').upper() == abbr
+                    or (g.get('away_team_abbreviation') or '').upper() == abbr
+                )
+            ):
                 past.append((when, g))
         if not past:
-            return {"team": team.get('full_name') or abbr, "abbr": abbr, "last_game": None}
+            return {"team": (team.get('full_name') if isinstance(team, dict) else abbr) or abbr, "abbr": abbr, "last_game": None}
         past.sort(key=lambda x: x[0], reverse=True)
         when, g = past[0]
         is_home = (g.get('home_team_abbreviation') or '').upper() == abbr
@@ -2059,7 +2091,7 @@ async def get_team_last_game(team_abbrev: str):
         opp_full = (g.get('away_team') if is_home else g.get('home_team')) or opp_abbr
         result = 'W' if team_score >= opp_score else 'L'
         return {
-            "team": team.get('full_name') or abbr,
+            "team": (team.get('full_name') if isinstance(team, dict) else abbr) or abbr,
             "abbr": abbr,
             "opponent": opp_full,
             "opponent_abbr": opp_abbr,

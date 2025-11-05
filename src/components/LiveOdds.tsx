@@ -1,5 +1,4 @@
-/* eslint-disable @typescript-eslint/no-explicit-any, react-hooks/exhaustive-deps */
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { TrendingUp, TrendingDown, RefreshCw, AlertTriangle, Clock, Activity } from 'lucide-react';
 import { api } from '../services/api';
 
@@ -40,7 +39,7 @@ const LiveOdds: React.FC<LiveOddsProps> = ({ selectedGameId }) => {
   const [oddsData, setOddsData] = useState<OddsData[]>([]);
   const [alerts, setAlerts] = useState<LiveAlert[]>([]);
   const [selectedGame, setSelectedGame] = useState<string | null>(null);
-  const [autoRefresh, setAutoRefresh] = useState(true);
+  // Auto-refresh removed: manual refresh only
   const [lastUpdate, setLastUpdate] = useState(new Date());
   const [loading, setLoading] = useState(true);
   const [showSelectedOnly, setShowSelectedOnly] = useState(false);
@@ -51,7 +50,7 @@ const LiveOdds: React.FC<LiveOddsProps> = ({ selectedGameId }) => {
   const [slug, setSlug] = useState<string>('');
   const [foundGame, setFoundGame] = useState<OddsData | null>(null);
 
-  const loadOdds = async () => {
+  const loadOdds = useCallback(async () => {
     setLoading(true);
     
     try {
@@ -125,20 +124,12 @@ const LiveOdds: React.FC<LiveOddsProps> = ({ selectedGameId }) => {
     if (selectedGameId) {
       setSelectedGame(selectedGameId);
     }
-  };
+  }, [selectedGameId]);
 
   useEffect(() => {
+    // Initial load only; subsequent updates via manual Refresh button
     loadOdds();
-
-    if (autoRefresh) {
-      const interval = setInterval(() => {
-        loadOdds();
-        setLastUpdate(new Date());
-      }, 30000); // Refresh every 30 seconds
-
-      return () => clearInterval(interval);
-    }
-  }, [autoRefresh]);
+  }, [loadOdds]);
 
   useEffect(() => {
     if (!loading && selectedGameId) {
@@ -335,17 +326,7 @@ const LiveOdds: React.FC<LiveOddsProps> = ({ selectedGameId }) => {
               </button>
             </div>
           )}
-          <label className="flex items-center space-x-2 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={autoRefresh}
-              onChange={(e) => setAutoRefresh(e.target.checked)}
-              className="rounded"
-              aria-label="Auto-refresh"
-              title="Auto-refresh"
-            />
-            <span className="text-sm text-gray-300">Auto-refresh</span>
-          </label>
+          {/* Auto-refresh removed */}
           <label className="flex items-center space-x-2 cursor-pointer">
             <input
               type="checkbox"
