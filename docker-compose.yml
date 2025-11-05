@@ -1,0 +1,79 @@
+services:
+  # Backend API Service
+  backend:
+    build: 
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: nba-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - NODE_ENV=production
+      - PYTHONPATH=/app
+      - TZ=America/Chicago
+    env_file:
+      - .env.production
+    volumes:
+      - ./logs:/app/logs
+      - backend_data:/app/data
+    networks:
+      - nba-network
+    depends_on:
+      - redis
+    healthcheck:
+      test: ["CMD", "python", "/app/healthcheck.py"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Frontend Service (Nginx serving built React app)
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+      args:
+        - VITE_API_BASE_URL=http://localhost:8000
+    container_name: nba-frontend
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - nba-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/ || exit 1"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+
+  # Redis for caching (only accessible within docker network)
+  redis:
+    image: redis:7-alpine
+    container_name: nba-redis
+    restart: unless-stopped
+    # No external port exposure - only accessible via docker network
+    volumes:
+      - redis_data:/data
+    networks:
+      - nba-network
+    command: redis-server --appendonly yes
+    sysctls:
+      - net.core.somaxconn=1024
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+
+networks:
+  nba-network:
+    driver: bridge
+
+volumes:
+  redis_data:
+    driver: local
+  backend_data:
+    driver: local

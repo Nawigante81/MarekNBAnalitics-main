@@ -1,0 +1,66 @@
+# NBA Analytics - ARM64 specific requirements for Raspberry Pi 4
+# Optimized package versions for ARM64 architecture
+
+# Core FastAPI framework
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+python-dotenv==1.0.0
+
+# HTTP and networking
+requests==2.31.0
+aiohttp==3.9.1
+httpx==0.25.2
+
+# Web scraping and parsing
+beautifulsoup4==4.12.2
+lxml==4.9.3
+
+# Data processing (ARM64 optimized versions)
+pandas==2.1.4
+numpy==1.26.4
+
+# Task scheduling
+APScheduler==3.10.4
+
+# Database and caching
+supabase==2.4.0
+psycopg2-binary==2.9.9
+redis==5.0.1
+
+# Core dependencies with ARM64 compatibility
+pydantic==2.12.3
+starlette==0.27.0
+anyio==3.7.1
+sniffio==1.3.1
+typing_extensions==4.15.0
+
+# Date and time handling
+python-dateutil==2.9.0.post0
+pytz==2023.3
+
+# Utilities
+six==1.17.0
+certifi==2025.10.5
+charset-normalizer==3.4.4
+idna==3.11
+urllib3==2.5.0
+
+# File upload handling
+python-multipart==0.0.6
+
+# Additional ARM64 optimized packages
+orjson==3.9.10  # Fast JSON library with ARM64 support
+PyJWT==2.8.0    # JWT handling
+passlib[bcrypt]==1.7.4  # Password hashing
+
+# Development and testing (optional)
+pytest==7.4.3
+pytest-asyncio==0.21.1
+httpx==0.25.2
+
+# Monitoring and logging
+structlog==23.2.0
+rich==13.7.0
+
+# ARM64 specific optimizations
+# These versions are specifically tested on Raspberry Pi 4

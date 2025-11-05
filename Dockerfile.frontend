@@ -1,0 +1,76 @@
+# Multi-stage build for React frontend
+FROM node:18-alpine AS builder
+
+# Set working directory
+WORKDIR /app
+
+# Create non-root user for builder stage
+RUN addgroup -g 1001 -S nodejs && \
+    adduser -S nextjs -u 1001
+
+# Copy package files first for better layer caching
+COPY package*.json ./
+
+# Install dependencies (include devDependencies so build tools like Vite are available)
+# Use npm ci for faster, reliable, reproducible builds
+RUN npm ci --silent --no-audit --no-fund
+
+# Build arguments for environment variables
+ARG VITE_API_BASE_URL=http://localhost:8000
+ARG VITE_SUPABASE_URL
+ARG VITE_SUPABASE_ANON_KEY
+ARG VITE_ODDS_API_KEY
+ARG VITE_APP_TIMEZONE=America/Chicago
+
+# Set environment variables for build
+ENV VITE_API_BASE_URL=$VITE_API_BASE_URL
+ENV VITE_SUPABASE_URL=$VITE_SUPABASE_URL
+ENV VITE_SUPABASE_ANON_KEY=$VITE_SUPABASE_ANON_KEY
+ENV VITE_ODDS_API_KEY=$VITE_ODDS_API_KEY
+ENV VITE_APP_TIMEZONE=$VITE_APP_TIMEZONE
+ENV NODE_ENV=production
+
+# Copy source code
+COPY . .
+
+# Change ownership to non-root user
+RUN chown -R nextjs:nodejs /app
+USER nextjs
+
+# Build the application
+RUN npm run build
+
+# Production stage with Nginx
+FROM nginx:alpine
+
+# Install curl for health checks and create nginx directories
+RUN apk add --no-cache curl && \
+    mkdir -p /var/cache/nginx/client_temp && \
+    mkdir -p /var/cache/nginx/proxy_temp && \
+    mkdir -p /var/cache/nginx/fastcgi_temp && \
+    mkdir -p /var/cache/nginx/uwsgi_temp && \
+    mkdir -p /var/cache/nginx/scgi_temp
+
+# Copy built application with proper ownership
+COPY --from=builder --chown=nginx:nginx /app/dist /usr/share/nginx/html
+
+# Copy custom nginx configuration
+COPY nginx-production.conf /etc/nginx/nginx.conf
+
+# Set proper permissions
+RUN chown -R nginx:nginx /usr/share/nginx/html && \
+    chown -R nginx:nginx /var/cache/nginx && \
+    chown -R nginx:nginx /var/log/nginx && \
+    chmod -R 755 /usr/share/nginx/html && \
+    chmod -R 755 /var/cache/nginx && \
+    chmod -R 755 /var/log/nginx
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8080/ || exit 1
+
+# Expose port 8080 (non-privileged port)
+EXPOSE 8080
+
+# Start nginx
+CMD ["nginx", "-g", "daemon off;"]

@@ -1,0 +1,309 @@
+# NBA Analytics Backend - ARM64/Pi4 Optimized Dockerfile
+FROM python:3.11-slim-bookworm
+
+# Set platform
+ARG TARGETPLATFORM=linux/arm64
+
+# Pi4 specific labels
+LABEL maintainer="NBA Analytics Team"
+LABEL description="NBA Analytics Backend optimized for Raspberry Pi 4 ARM64"
+LABEL architecture="arm64"
+LABEL platform="raspberry-pi-4"
+
+# Environment variables for ARM64 optimization
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONOPTIMIZE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    DEBIAN_FRONTEND=noninteractive
+
+# Create app user for security
+RUN groupadd --gid 1000 appuser && \
+    useradd --uid 1000 --gid appuser --shell /bin/bash --create-home appuser
+
+# Install ARM64-optimized system dependencies
+RUN apt-get update && apt-get install -y \
+    # Essential build tools for ARM64
+    gcc \
+    g++ \
+    make \
+    libc6-dev \
+    # ARM64 specific libraries
+    libffi-dev \
+    libssl-dev \
+    libpq-dev \
+    # Networking and utilities
+    curl \
+    wget \
+    # Cleanup in same layer
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
+
+# Set work directory
+WORKDIR /app
+
+# Copy requirements first for better caching
+COPY requirements.txt requirements-pi4.txt* ./
+
+# Create ARM64-specific requirements if not exists
+RUN if [ ! -f requirements-pi4.txt ]; then \
+    cat > requirements-pi4.txt << 'EOF'
+# ARM64 optimized requirements for NBA Analytics Backend
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+python-dotenv==1.0.0
+requests==2.31.0
+beautifulsoup4==4.12.2
+pandas==2.1.4
+numpy==1.26.4
+APScheduler==3.10.4
+supabase==2.4.0
+aiohttp==3.9.1
+lxml==4.9.3
+
+# ARM64 compatible versions
+pydantic==2.12.3
+starlette==0.27.0
+httpx==0.25.2
+anyio==3.7.1
+sniffio==1.3.1
+typing_extensions==4.15.0
+python-dateutil==2.9.0.post0
+pytz==2023.3
+six==1.17.0
+certifi==2025.10.5
+charset-normalizer==3.4.4
+idna==3.11
+urllib3==2.5.0
+
+# Additional ARM64 optimizations
+psycopg2-binary==2.9.9
+redis==5.0.1
+python-multipart==0.0.6
+EOF
+    fi
+
+# Install Python dependencies with ARM64 optimizations
+RUN pip install --upgrade pip setuptools wheel && \
+    # Install with extended timeout for ARM64
+    pip install --timeout=300 -r requirements-pi4.txt && \
+    # Clean pip cache
+    pip cache purge
+
+# Copy application code
+COPY . .
+
+# Create necessary directories
+RUN mkdir -p logs data && \
+    # Change ownership to appuser
+    chown -R appuser:appuser /app
+
+# Switch to non-root user
+USER appuser
+
+# Pi4 specific health check script
+RUN cat > /app/health_check_pi4.py << 'EOF'
+#!/usr/bin/env python3
+"""
+ARM64/Pi4 optimized health check for NBA Analytics Backend
+"""
+import os
+import sys
+import asyncio
+import aiohttp
+import psutil
+import time
+from pathlib import Path
+
+async def check_backend_health():
+    """Check if backend is responding"""
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
+            async with session.get('http://localhost:8000/health') as response:
+                if response.status == 200:
+                    return True
+                return False
+    except Exception as e:
+        print(f"Backend health check failed: {e}")
+        return False
+
+def check_pi4_resources():
+    """Check Pi4 specific resources"""
+    try:
+        # Memory check
+        memory = psutil.virtual_memory()
+        if memory.percent > 90:
+            print(f"WARNING: High memory usage: {memory.percent}%")
+            return False
+        
+        # CPU temperature (Pi4 specific)
+        if Path('/sys/class/thermal/thermal_zone0/temp').exists():
+            with open('/sys/class/thermal/thermal_zone0/temp', 'r') as f:
+                temp_millidegree = int(f.read().strip())
+                temp_celsius = temp_millidegree / 1000
+                if temp_celsius > 80:
+                    print(f"WARNING: High CPU temperature: {temp_celsius}°C")
+                    return False
+        
+        # Load average check
+        load1, load5, load15 = os.getloadavg()
+        cpu_count = os.cpu_count()
+        if load1 > cpu_count * 1.5:
+            print(f"WARNING: High load average: {load1} (CPUs: {cpu_count})")
+            return False
+        
+        return True
+    except Exception as e:
+        print(f"Pi4 resource check failed: {e}")
+        return False
+
+async def main():
+    """Main health check function"""
+    print("🍓 NBA Analytics Pi4 Health Check")
+    
+    # Check backend
+    backend_ok = await check_backend_health()
+    print(f"Backend: {'🟢 OK' if backend_ok else '🔴 FAIL'}")
+    
+    # Check Pi4 resources
+    resources_ok = check_pi4_resources()
+    print(f"Pi4 Resources: {'🟢 OK' if resources_ok else '🔴 WARN'}")
+    
+    # Overall status
+    if backend_ok and resources_ok:
+        print("🎉 Overall status: HEALTHY")
+        sys.exit(0)
+    else:
+        print("⚠️  Overall status: DEGRADED")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    asyncio.run(main())
+EOF
+
+# Make health check executable
+RUN chmod +x /app/health_check_pi4.py
+
+# Expose port
+EXPOSE 8000
+
+# Pi4 optimized startup script
+RUN cat > /app/start_pi4.sh << 'EOF'
+#!/bin/bash
+set -e
+
+echo "🍓 Starting NBA Analytics Backend on Raspberry Pi 4"
+
+# Pi4 system info
+echo "System Info:"
+echo "  Architecture: $(uname -m)"
+echo "  CPU Cores: $(nproc)"
+echo "  Memory: $(free -h | grep Mem | awk '{print $2}')"
+
+# Check if running on Pi4
+if [ -f /proc/cpuinfo ]; then
+    if grep -q "Raspberry Pi 4" /proc/cpuinfo; then
+        echo "  Device: Raspberry Pi 4 detected ✅"
+        
+        # Pi4 optimizations
+        export PYTHONOPTIMIZE=1
+        export PYTHONDONTWRITEBYTECODE=1
+        export MALLOC_MMAP_THRESHOLD_=1048576
+        export MALLOC_TRIM_THRESHOLD_=134217728
+        
+        # Single worker for Pi4
+        WORKERS=1
+        
+        # Pi4 specific worker class
+        WORKER_CLASS="uvicorn.workers.UvicornWorker"
+        
+        # Extended timeouts for ARM64
+        TIMEOUT=60
+        KEEPALIVE=30
+        
+        echo "  Pi4 optimizations applied ⚡"
+    else
+        echo "  Device: Not Pi4, using default settings"
+        WORKERS=${WORKERS:-2}
+        WORKER_CLASS="uvicorn.workers.UvicornWorker"
+        TIMEOUT=30
+        KEEPALIVE=15
+    fi
+else
+    echo "  Device: Unknown, using default settings"
+    WORKERS=${WORKERS:-2}
+    WORKER_CLASS="uvicorn.workers.UvicornWorker"
+    TIMEOUT=30
+    KEEPALIVE=15
+fi
+
+# Database migration check
+echo "Checking database connection..."
+python -c "
+import asyncio
+import asyncpg
+import os
+from urllib.parse import urlparse
+
+async def check_db():
+    try:
+        db_url = os.getenv('DATABASE_URL', 'postgresql://nba_user:nba_secure_password_2023@localhost:5432/nba_analytics')
+        parsed = urlparse(db_url)
+        
+        conn = await asyncpg.connect(
+            host=parsed.hostname,
+            port=parsed.port or 5432,
+            user=parsed.username,
+            password=parsed.password,
+            database=parsed.path[1:]  # Remove leading slash
+        )
+        
+        # Test query
+        result = await conn.fetchval('SELECT 1')
+        await conn.close()
+        
+        if result == 1:
+            print('  Database: Connected ✅')
+            return True
+        else:
+            print('  Database: Connection test failed ❌')
+            return False
+            
+    except Exception as e:
+        print(f'  Database: Connection failed - {e} ❌')
+        return False
+
+if not asyncio.run(check_db()):
+    print('  Database: Running in fallback mode 🔄')
+"
+
+echo ""
+echo "Starting uvicorn server..."
+echo "  Workers: $WORKERS"
+echo "  Worker Class: $WORKER_CLASS"
+echo "  Timeout: ${TIMEOUT}s"
+echo "  Keep-Alive: ${KEEPALIVE}s"
+echo ""
+
+# Start the application
+exec uvicorn main:app \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --workers $WORKERS \
+    --worker-class $WORKER_CLASS \
+    --timeout-keep-alive $KEEPALIVE \
+    --access-log \
+    --loop asyncio \
+    --log-level info
+EOF
+
+# Make startup script executable
+RUN chmod +x /app/start_pi4.sh
+
+# Health check
+HEALTHCHECK --interval=45s --timeout=15s --start-period=120s --retries=3 \
+    CMD python /app/health_check_pi4.py
+
+# Start command
+CMD ["/app/start_pi4.sh"]

@@ -1,0 +1,229 @@
+# NBA Analytics - ARM64 Caddyfile for Raspberry Pi 4
+# Optimized for ARM64 architecture with performance considerations
+
+# Main domain configuration
+{$DOMAIN_NAME:localhost} {
+    # ARM64/Pi4 optimizations - reduced overhead
+    
+    # Essential security headers (lighter for Pi)
+    header {
+        X-Frame-Options "SAMEORIGIN"
+        X-Content-Type-Options "nosniff"  
+        X-XSS-Protection "1; mode=block"
+        -Server
+        -X-Powered-By
+    }
+
+    # Optimized compression for ARM64
+    encode {
+        gzip 6
+        # Skip zstd compression to reduce CPU load on ARM64
+        match {
+            header Content-Type text/*
+            header Content-Type application/json*
+            header Content-Type application/javascript*
+            header Content-Type application/xml*
+        }
+    }
+
+    # Rate limiting (lighter for Pi4)
+    rate_limit {
+        zone dynamic_rl {
+            key {remote_host}
+            window 1m
+            events 100
+        }
+    }
+
+    # Health check endpoint
+    handle /health {
+        respond "healthy - Pi4 ARM64 - {system.hostname}" 200 {
+            header Content-Type "text/plain"
+            header Cache-Control "no-cache"
+        }
+    }
+
+    # Pi-specific system info endpoint
+    handle /pi-status {
+        respond "Pi4 ARM64 - Load: {system.load_average} - Uptime: {system.uptime}" 200 {
+            header Content-Type "text/plain"
+            header Cache-Control "no-cache"
+        }
+    }
+
+    # Backend API proxy with ARM64-optimized timeouts
+    handle /api/* {
+        reverse_proxy 127.0.0.1:8000 {
+            # Extended timeouts for ARM64 performance
+            health_uri /health
+            health_interval 60s
+            health_timeout 20s
+            health_status 2xx
+            
+            # Connection pooling for efficiency
+            transport http {
+                # Longer timeouts for ARM64
+                dial_timeout 15s
+                response_header_timeout 45s
+                expect_continue_timeout 5s
+                # Keep connections alive
+                keep_alive 30s
+                max_conns_per_host 10
+            }
+            
+            # Headers for proper proxying
+            header_up Host {upstream_hostport}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Host {host}
+            
+            # ARM64 specific headers
+            header_up X-Pi4-ARM64 "true"
+        }
+    }
+
+    # Frontend static files with ARM64 optimizations
+    handle {
+        # Try files first, fallback to index.html for SPA
+        try_files {path} /index.html
+        
+        root * /var/www/nba-analytics/dist
+        file_server {
+            # Disable directory browsing
+            browse false
+            # Optimized for Pi4 storage
+            precompressed gzip
+        }
+        
+        # Static asset caching (conservative for Pi4)
+        @static_assets {
+            path *.js *.css *.png *.jpg *.jpeg *.gif *.ico *.svg *.woff *.woff2
+        }
+        header @static_assets {
+            Cache-Control "public, max-age=86400, immutable"
+            Vary "Accept-Encoding"
+        }
+
+        # HTML files - shorter cache for updates
+        @html {
+            path *.html
+        }
+        header @html {
+            Cache-Control "public, max-age=3600"
+        }
+
+        # JSON and other data files
+        @data {
+            path *.json *.xml *.txt
+        }
+        header @data {
+            Cache-Control "public, max-age=1800"
+        }
+    }
+
+    # Pi4-optimized logging
+    log {
+        output file /var/log/caddy/nba-analytics-pi4.log {
+            roll_size 50MiB
+            roll_keep 5
+            roll_keep_for 168h
+        }
+        format console
+        level INFO
+    }
+
+    # Error handling
+    handle_errors {
+        @502 expression {http.error.status_code} == 502
+        handle @502 {
+            respond "Backend temporarily unavailable on Pi4" 502 {
+                header Content-Type "text/plain"
+            }
+        }
+        
+        @503 expression {http.error.status_code} == 503
+        handle @503 {
+            respond "Service temporarily unavailable on Pi4" 503 {
+                header Content-Type "text/plain"
+            }
+        }
+        
+        # Generic error page
+        respond "Error {http.error.status_code} on Pi4" {http.error.status_code} {
+            header Content-Type "text/plain"
+        }
+    }
+}
+
+# Local development access (no SSL)
+127.0.0.1, localhost {
+    # Development mode - direct proxy to dev servers
+    
+    handle /api/* {
+        reverse_proxy 127.0.0.1:8000 {
+            health_uri /health
+            health_interval 30s
+        }
+    }
+    
+    handle {
+        # In development, proxy to Vite dev server
+        reverse_proxy 127.0.0.1:5173 {
+            # Vite dev server headers
+            header_up Host {upstream_hostport}
+        }
+    }
+    
+    # Minimal logging for development
+    log {
+        output file /var/log/caddy/nba-analytics-dev.log {
+            roll_size 10MiB
+            roll_keep 2
+        }
+        format console
+        level DEBUG
+    }
+}
+
+# Global ARM64 optimizations
+{
+    # Pi4-specific global settings
+    
+    # Reduce admin API overhead
+    admin off
+    
+    # Optimize for ARM64 performance
+    servers {
+        # Conservative limits for Pi4
+        max_header_size 8kb
+        read_timeout 30s
+        write_timeout 60s
+        idle_timeout 120s
+        
+        # Connection limits for Pi4
+        max_concurrent_streams 100
+    }
+    
+    # ARM64 TLS optimizations
+    tls {
+        # Prefer ECDSA for ARM64 efficiency
+        curves x25519 secp256r1
+        # Limit cipher suites for performance
+        ciphers TLS_AES_128_GCM_SHA256 TLS_AES_256_GCM_SHA384 TLS_CHACHA20_POLY1305_SHA256
+        # Conservative protocol versions
+        protocols tls1.2 tls1.3
+    }
+    
+    # OCSP stapling for better SSL performance
+    ocsp_stapling off  # Disable to reduce memory usage on Pi4
+    
+    # Global logging
+    log {
+        output file /var/log/caddy/caddy-global-pi4.log {
+            roll_size 25MiB
+            roll_keep 3
+        }
+        format console
+        level WARN
+    }
+}

@@ -1,0 +1,191 @@
+# NBA Analytics Frontend - ARM64/Pi4 Optimized Dockerfile
+FROM node:18-alpine as builder
+
+# Set platform and labels
+ARG TARGETPLATFORM=linux/arm64
+LABEL maintainer="NBA Analytics Team"
+LABEL description="NBA Analytics Frontend optimized for Raspberry Pi 4 ARM64"
+LABEL architecture="arm64"
+LABEL platform="raspberry-pi-4"
+
+# Pi4 Node.js optimizations
+ENV NODE_ENV=production \
+    NODE_OPTIONS="--max-old-space-size=512" \
+    NPM_CONFIG_PROGRESS=false \
+    NPM_CONFIG_AUDIT=false \
+    NPM_CONFIG_FUND=false
+
+# Install build dependencies for ARM64
+RUN apk add --no-cache \
+    python3 \
+    make \
+    g++ \
+    && rm -rf /var/cache/apk/*
+
+WORKDIR /app
+
+# Copy package files
+COPY package*.json ./
+
+# Install dependencies with ARM64 optimizations
+RUN npm ci --only=production --timeout=300000 && \
+    npm cache clean --force
+
+# Copy source code
+COPY . .
+
+# Build the application with Pi4 optimizations
+RUN npm run build
+
+# Production stage - use nginx-alpine for ARM64
+FROM nginx:alpine
+
+# Install curl for health checks
+RUN apk add --no-cache curl
+
+# Create nginx user and set permissions
+RUN addgroup -g 101 -S nginx && \
+    adduser -S -D -H -u 101 -h /var/cache/nginx -s /sbin/nologin -G nginx -g nginx nginx
+
+# Copy built application
+COPY --from=builder /app/dist /usr/share/nginx/html
+
+# Pi4 optimized nginx configuration
+RUN cat > /etc/nginx/nginx.conf << 'EOF'
+# NBA Analytics - Pi4 ARM64 Optimized Nginx Configuration
+
+user nginx;
+worker_processes 1;  # Single worker for Pi4
+
+error_log /var/log/nginx/error.log warn;
+pid /var/run/nginx.pid;
+
+events {
+    worker_connections 512;  # Reduced for Pi4
+    use epoll;
+    multi_accept on;
+}
+
+http {
+    include /etc/nginx/mime.types;
+    default_type application/octet-stream;
+
+    # Pi4 optimized logging
+    log_format main '$remote_addr - $remote_user [$time_local] "$request" '
+                    '$status $body_bytes_sent "$http_referer" '
+                    '"$http_user_agent" "$http_x_forwarded_for"';
+
+    access_log /var/log/nginx/access.log main;
+
+    # Pi4 performance optimizations
+    sendfile on;
+    tcp_nopush on;
+    tcp_nodelay on;
+    keepalive_timeout 30;  # Reduced for memory efficiency
+    types_hash_max_size 2048;
+    client_max_body_size 4m;  # Reduced for Pi4
+
+    # Compression (lighter for ARM64)
+    gzip on;
+    gzip_vary on;
+    gzip_min_length 1024;
+    gzip_comp_level 4;  # Reduced compression level
+    gzip_types
+        text/plain
+        text/css
+        text/xml
+        text/javascript
+        application/javascript
+        application/xml+rss
+        application/json;
+
+    # Security headers (essential only)
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+
+    server {
+        listen 80;
+        listen [::]:80;
+        server_name localhost;
+
+        root /usr/share/nginx/html;
+        index index.html;
+
+        # Pi4 optimized caching
+        location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2)$ {
+            expires 1d;
+            add_header Cache-Control "public, immutable";
+            add_header Vary "Accept-Encoding";
+        }
+
+        # SPA fallback
+        location / {
+            try_files $uri $uri/ /index.html;
+            
+            # HTML files - short cache
+            location ~* \.html$ {
+                expires 1h;
+                add_header Cache-Control "public";
+            }
+        }
+
+        # Health check
+        location /health {
+            access_log off;
+            return 200 "healthy - Pi4 ARM64\n";
+            add_header Content-Type text/plain;
+        }
+
+        # Error pages
+        error_page 404 /404.html;
+        error_page 500 502 503 504 /50x.html;
+        
+        location = /50x.html {
+            root /usr/share/nginx/html;
+        }
+    }
+}
+EOF
+
+# Health check script for Pi4
+RUN cat > /usr/local/bin/health-check.sh << 'EOF'
+#!/bin/sh
+# Pi4 specific health check
+
+# Check nginx process
+if ! pgrep nginx > /dev/null; then
+    echo "Nginx process not running"
+    exit 1
+fi
+
+# Check if service responds
+if ! curl -f -s http://localhost/health > /dev/null; then
+    echo "Nginx not responding to health check"
+    exit 1
+fi
+
+# Check memory usage (Pi4 specific)
+MEM_USAGE=$(cat /proc/meminfo | grep MemAvailable | awk '{print $2}')
+if [ "$MEM_USAGE" -lt 102400 ]; then  # Less than 100MB available
+    echo "Low memory warning: ${MEM_USAGE}KB available"
+fi
+
+echo "Nginx healthy on Pi4"
+exit 0
+EOF
+
+RUN chmod +x /usr/local/bin/health-check.sh
+
+# Expose port
+EXPOSE 80
+
+# Health check
+HEALTHCHECK --interval=60s --timeout=10s --start-period=30s --retries=2 \
+    CMD /usr/local/bin/health-check.sh
+
+# Use nginx user
+USER nginx
+
+# Start nginx
+CMD ["nginx", "-g", "daemon off;"]

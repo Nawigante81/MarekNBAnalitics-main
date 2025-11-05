@@ -1,0 +1,31 @@
+# =================================================================
+# NBA Analytics Backend - Minimal Dependencies
+# =================================================================
+# Minimal set of dependencies for basic functionality
+# Use this if you encounter installation issues with the full requirements.txt
+
+# Core Framework
+fastapi==0.109.0
+uvicorn[standard]==0.25.0
+
+# Database
+supabase==2.7.4
+
+# Scheduling
+APScheduler==3.10.4
+
+# HTTP & Web Scraping
+httpx==0.27.2
+beautifulsoup4==4.12.2
+requests==2.31.0
+
+# Data Processing
+pandas==2.1.4
+numpy==1.26.2
+
+# Environment
+python-dotenv==1.0.0
+pytz==2023.3.post1
+
+# Logging
+loguru==0.7.2

@@ -1,0 +1,87 @@
+# NBA Analytics - Corrected Caddyfile for Caddy v2
+# Fixed: removed rotate {}, header_up X-Forwarded-Proto, proper v2 syntax
+
+# Global configuration block
+{
+    # Global logging configuration (optional)
+    log {
+        output file /var/log/caddy/caddy.log {
+            roll_size 10MiB
+            roll_keep 5
+            roll_keep_for 720h
+        }
+        format console
+    }
+}
+
+# Main production domain
+192.168.100.196 {
+    # Security headers
+    header {
+        X-Frame-Options "SAMEORIGIN"
+        X-Content-Type-Options "nosniff"  
+        X-XSS-Protection "1; mode=block"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        -Server
+    }
+
+    # Enable compression
+    encode gzip
+
+    # Health check endpoint
+    handle /health {
+        respond "healthy" 200 {
+            header Content-Type "text/plain"
+        }
+    }
+
+    # Backend API proxy - FIXED: removed X-Forwarded-Proto
+    handle /api/* {
+        reverse_proxy localhost:8000 {
+            health_uri /health
+            health_interval 30s
+            health_timeout 10s
+            
+            # Headers - X-Forwarded-Proto removed (automatic in v2)
+            header_up Host {upstream_hostport}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+        }
+    }
+
+    # Frontend static files
+    handle {
+        try_files {path} /index.html
+        root * /var/www/nba-analytics/dist
+        file_server
+        
+        # Cache static assets
+        @static {
+            path *.js *.css *.png *.jpg *.jpeg *.gif *.ico *.svg *.woff *.woff2
+        }
+        header @static {
+            Cache-Control "public, max-age=86400, immutable"
+        }
+    }
+
+    # FIXED: Proper v2 logging syntax with output file
+    log {
+        output file /var/log/caddy/access.log {
+            roll_size 10MiB
+            roll_keep 5
+            roll_keep_for 720h
+        }
+        format console
+    }
+}
+
+# Development/local access
+localhost {
+    handle /api/* {
+        reverse_proxy localhost:8000
+    }
+    
+    handle {
+        reverse_proxy localhost:5173
+    }
+}

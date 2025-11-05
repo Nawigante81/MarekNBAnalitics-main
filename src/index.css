@@ -1,0 +1,63 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Custom animations */
+.animate-spin-reverse {
+  animation: spin 1.5s linear infinite reverse;
+}
+
+.background-gradient {
+  background-image: radial-gradient(circle at 20% 50%, rgba(120, 119, 198, 0.3) 0%, transparent 50%),
+                    radial-gradient(circle at 80% 20%, rgba(255, 119, 198, 0.3) 0%, transparent 50%),
+                    radial-gradient(circle at 40% 70%, rgba(88, 196, 221, 0.3) 0%, transparent 50%);
+}
+
+@layer base {
+  body {
+    @apply bg-gray-950 text-gray-100 font-sans antialiased;
+  }
+}
+
+@layer components {
+  .glass-card {
+    @apply backdrop-blur-sm bg-white/5 border border-white/10 rounded-xl shadow-xl;
+  }
+  
+  .neon-border {
+    @apply border border-blue-400/30 shadow-[0_0_15px_rgba(59,130,246,0.15)];
+  }
+  
+  .bulls-gradient {
+    @apply bg-gradient-to-r from-red-600 via-red-500 to-red-400;
+  }
+  
+  .win-color {
+    @apply text-green-400;
+  }
+  
+  .loss-color {
+    @apply text-red-400;
+  }
+  
+  .neutral-color {
+    @apply text-yellow-400;
+  }
+  
+  .fade-in {
+    @apply animate-pulse;
+  }
+}
+
+@keyframes glow {
+  0%, 100% {
+    box-shadow: 0 0 20px rgba(59, 130, 246, 0.3);
+  }
+  50% {
+    box-shadow: 0 0 30px rgba(59, 130, 246, 0.5);
+  }
+}
+
+.glow-animation {
+  animation: glow 2s ease-in-out infinite;
+}

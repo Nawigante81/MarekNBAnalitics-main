@@ -1,0 +1,53 @@
+# NBA Analytics - Raspberry Pi 4 ARM64 Optimized Caddyfile
+192.168.100.196 {
+    # Security headers
+    header {
+        X-Frame-Options "SAMEORIGIN"
+        X-Content-Type-Options "nosniff"
+        X-XSS-Protection "1; mode=block"
+        -Server
+    }
+
+    # Compression
+    encode gzip
+
+    # Health check endpoint
+    handle /health {
+        respond "healthy - Pi4 ARM64" 200
+        header Content-Type "text/plain"
+    }
+
+    # Backend API proxy
+    handle /api/* {
+        reverse_proxy 127.0.0.1:8000 {
+            health_uri /health
+            health_interval 45s
+            health_timeout 15s
+
+            header_up Host {upstream_hostport}
+            header_up X-Real-IP {remote_addr}
+            header_up X-Forwarded-For {remote_addr}
+
+            transport http {
+                dial_timeout 10s
+                response_header_timeout 30s
+            }
+        }
+    }
+
+    # Frontend static files
+    handle {
+        try_files {path} /index.html
+        root * /var/www/nba-analytics/dist
+        file_server
+
+        @static path *.js *.css *.png *.jpg *.jpeg *.gif *.ico *.svg
+        header @static Cache-Control "public, max-age=86400"
+    }
+
+    # Logging
+    log {
+        output file /var/log/caddy/nba-analytics.log
+        level WARN
+    }
+}

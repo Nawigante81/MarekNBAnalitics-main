@@ -1,0 +1,246 @@
+# NBA Analytics - Docker Compose for Raspberry Pi 4 ARM64
+version: '3.8'
+
+services:
+  # PostgreSQL Database (ARM64 compatible)
+  postgres:
+    image: postgres:15-alpine
+    platform: linux/arm64
+    container_name: nba-postgres-pi4
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: nba_analytics
+      POSTGRES_USER: nba_user
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-nba_secure_password_2023}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --lc-collate=C --lc-ctype=C"
+    volumes:
+      - postgres_data_pi4:/var/lib/postgresql/data
+      - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+    ports:
+      - "5432:5432"
+    networks:
+      - nba-network-pi4
+    # Pi4 optimizations
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.5'
+        reservations:
+          memory: 128M
+          cpus: '0.25'
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nba_user -d nba_analytics"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # Redis Cache (ARM64 compatible)
+  redis:
+    image: redis:7-alpine
+    platform: linux/arm64
+    container_name: nba-redis-pi4
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 64mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data_pi4:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - nba-network-pi4
+    # Pi4 optimizations
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: '0.25'
+        reservations:
+          memory: 64M
+          cpus: '0.1'
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # NBA Analytics Backend (ARM64)
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.pi4
+      platform: linux/arm64
+    container_name: nba-backend-pi4
+    restart: unless-stopped
+    environment:
+      - DATABASE_URL=postgresql://nba_user:${POSTGRES_PASSWORD:-nba_secure_password_2023}@postgres:5432/nba_analytics
+      - REDIS_URL=redis://redis:6379
+      - ENVIRONMENT=production
+      - PORT=8000
+      - WORKERS=1  # Single worker for Pi4
+      - LOG_LEVEL=info
+      # Pi4 specific optimizations
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+      - PYTHONOPTIMIZE=1
+    volumes:
+      - ./backend:/app
+      - backend_logs_pi4:/app/logs
+    ports:
+      - "8000:8000"
+    networks:
+      - nba-network-pi4
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # Pi4 resource limits
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '1.0'
+        reservations:
+          memory: 256M
+          cpus: '0.5'
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 45s
+      timeout: 15s
+      retries: 3
+      start_period: 120s
+
+  # NBA Analytics Frontend (ARM64)
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend.pi4
+      platform: linux/arm64
+    container_name: nba-frontend-pi4
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - VITE_API_URL=http://localhost:8000
+      # Pi4 Node.js optimizations
+      - NODE_OPTIONS=--max-old-space-size=512
+    volumes:
+      - ./dist:/usr/share/nginx/html:ro
+    ports:
+      - "5173:80"
+    networks:
+      - nba-network-pi4
+    depends_on:
+      backend:
+        condition: service_healthy
+    # Pi4 resource limits
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: '0.5'
+        reservations:
+          memory: 64M
+          cpus: '0.25'
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80/"]
+      interval: 60s
+      timeout: 10s
+      retries: 2
+
+  # Caddy Web Server (ARM64)
+  caddy:
+    image: caddy:2.7-alpine
+    platform: linux/arm64
+    container_name: nba-caddy-pi4
+    restart: unless-stopped
+    environment:
+      - DOMAIN_NAME=${DOMAIN_NAME:-localhost}
+    volumes:
+      - ./Caddyfile.pi4:/etc/caddy/Caddyfile:ro
+      - caddy_data_pi4:/data
+      - caddy_config_pi4:/config
+      - caddy_logs_pi4:/var/log/caddy
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"  # HTTP/3
+    networks:
+      - nba-network-pi4
+    depends_on:
+      backend:
+        condition: service_healthy
+      frontend:
+        condition: service_healthy
+    # Pi4 optimizations
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: '0.5'
+        reservations:
+          memory: 64M
+          cpus: '0.25'
+    healthcheck:
+      test: ["CMD", "caddy", "validate", "--config", "/etc/caddy/Caddyfile"]
+      interval: 60s
+      timeout: 10s
+      retries: 2
+
+  # Monitoring (Lightweight for Pi4)
+  monitoring:
+    image: prom/node-exporter:latest
+    platform: linux/arm64
+    container_name: nba-monitoring-pi4
+    restart: unless-stopped
+    command:
+      - '--path.rootfs=/host'
+      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
+      # Pi4 specific collectors
+      - '--collector.temperature'
+      - '--collector.hwmon'
+    volumes:
+      - /:/host:ro,rslave
+      - /sys:/host/sys:ro
+      - /proc:/host/proc:ro
+    ports:
+      - "9100:9100"
+    networks:
+      - nba-network-pi4
+    # Minimal resources for monitoring
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+          cpus: '0.25'
+        reservations:
+          memory: 32M
+          cpus: '0.1'
+
+networks:
+  nba-network-pi4:
+    driver: bridge
+    name: nba-network-pi4
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+volumes:
+  postgres_data_pi4:
+    name: nba-postgres-data-pi4
+    driver: local
+  redis_data_pi4:
+    name: nba-redis-data-pi4
+    driver: local
+  backend_logs_pi4:
+    name: nba-backend-logs-pi4
+    driver: local
+  caddy_data_pi4:
+    name: nba-caddy-data-pi4
+    driver: local
+  caddy_config_pi4:
+    name: nba-caddy-config-pi4
+    driver: local
+  caddy_logs_pi4:
+    name: nba-caddy-logs-pi4
+    driver: local
