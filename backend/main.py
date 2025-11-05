@@ -21,6 +21,8 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 import pytz
 from external_apis import fetch_nba_teams, fetch_nba_games, fetch_live_odds, fetch_nba_players, fetch_player_stats, fetch_player_by_id, ExternalAPIError
+with contextlib.suppress(Exception):
+    import google.generativeai as genai  # type: ignore  # Optional AI integration
 
 # Temporarily use mock implementations to avoid httpx_socks conflicts with supabase
 # These will be loaded dynamically when needed
@@ -303,6 +305,115 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.post("/api/ai/analysis")
+async def ai_team_analysis(payload: dict):
+    """Generate an AI commentary for a team using recent real stats.
+    Body: {"team_abbr": "CHI", "focus": "bulls"}
+    Requires GOOGLE_API_KEY (Gemini). Falls back to heuristic summary if not configured.
+    """
+    try:
+        team_abbr = str(payload.get("team_abbr") or payload.get("team") or "").upper()
+        focus = str(payload.get("focus") or "").strip()
+        if not team_abbr:
+            raise HTTPException(status_code=400, detail="team_abbr is required")
+
+        # Build recent stats context
+        end_date = datetime.now().date()
+        start_date = end_date - timedelta(days=45)
+        teams = await fetch_nba_teams()
+        team = next((t for t in teams if (t.get("abbreviation") or "").upper() == team_abbr), None)
+        if not team:
+            raise HTTPException(status_code=404, detail=f"Team '{team_abbr}' not found")
+        games = await fetch_nba_games(start_date=start_date.isoformat(), end_date=end_date.isoformat(), team_id=str(team.get("id")))
+        games = [g for g in games if g.get("home_team_score") is not None and g.get("visitor_team_score") is not None]
+        games.sort(key=lambda g: g.get("commence_time", ""), reverse=True)
+        recent = games[:10]
+        wins = 0
+        losses = 0
+        pts = 0
+        opp_pts = 0
+        for g in recent:
+            is_home = (g.get("home_team_abbreviation") or "") == team_abbr
+            hs = g.get("home_team_score") or 0
+            as_ = g.get("visitor_team_score") or 0
+            team_score = hs if is_home else as_
+            opp_score = as_ if is_home else hs
+            pts += team_score
+            opp_pts += opp_score
+            if team_score > opp_score:
+                wins += 1
+            else:
+                losses += 1
+        cnt = max(1, len(recent))
+        ppg = round(pts / cnt, 1)
+        papg = round(opp_pts / cnt, 1)
+        net = round(ppg - papg, 1)
+        record = f"{wins}-{losses}"
+
+        # Compose a compact context for the model
+        context = {
+            "team": team.get("full_name") or team.get("name") or team_abbr,
+            "abbr": team_abbr,
+            "recent_record": record,
+            "ppg": ppg,
+            "papg": papg,
+            "net": net,
+            "games": [
+                {
+                    "date": (g.get("commence_time") or "")[:10],
+                    "home": (g.get("home_team_abbreviation") or "") == team_abbr,
+                    "opp": g.get("away_team_abbreviation") if (g.get("home_team_abbreviation") or "") == team_abbr else g.get("home_team_abbreviation"),
+                    "team_score": (g.get("home_team_score") or 0) if (g.get("home_team_abbreviation") or "") == team_abbr else (g.get("visitor_team_score") or 0),
+                    "opp_score": (g.get("visitor_team_score") or 0) if (g.get("home_team_abbreviation") or "") == team_abbr else (g.get("home_team_score") or 0),
+                }
+                for g in recent
+            ],
+        }
+
+        api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+        if api_key and 'genai' in globals():
+            try:
+                genai.configure(api_key=api_key)
+                model = genai.GenerativeModel("gemini-1.5-flash")
+                prompt = (
+                    "Provide a concise, data-aware commentary for the NBA team below. "
+                    "Focus on form (last 10), offensive/defensive profile (PPG/PAPG), net rating, and 2-3 actionable insights. "
+                    "Avoid hallucinations; if data is missing, say so briefly. Polish language.\n\n"
+                    f"FOCUS: {focus or 'ogólna analiza'}\n"
+                    f"TEAM: {context['team']} ({context['abbr']})\n"
+                    f"LAST10: {context['recent_record']}\nPPG: {ppg} | PAPG: {papg} | NET: {net}\n"
+                    f"RECENT GAMES (date, H/A, score): "
+                    + ", ".join(
+                        [
+                            f"{g['date']} {'H' if g['home'] else 'A'} {g['team_score']}-{g['opp_score']} vs {g['opp']}"
+                            for g in context["games"]
+                        ]
+                    )
+                )
+                resp = await anyio.to_thread.run_sync(lambda: model.generate_content(prompt))
+                text = getattr(resp, 'text', None) or (getattr(resp, 'candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text'))
+                if not text:
+                    text = f"Ostatnie 10: {record}. Profil: PPG {ppg}, PAPG {papg}, Net {net}."
+                return {"team": context["team"], "abbr": team_abbr, "analysis": text, "model": "gemini-1.5-flash"}
+            except Exception as e:
+                logger.warning(f"Gemini generation failed: {e}")
+                # Fall through to heuristic
+
+        # Heuristic fallback
+        direction = "poprawa" if net > 0 else "pogorszenie"
+        text = (
+            f"{context['team']} ({team_abbr}) – forma {record} w ostatnich 10. "
+            f"Atak {ppg} PPG, obrona {papg} PAPG, Net {net}. "
+            f"Sugeruje to {direction} bilansu. Kluczem będzie utrzymanie tempa ataku oraz ograniczenie strat punktowych."
+        )
+        return {"team": context["team"], "abbr": team_abbr, "analysis": text, "model": "heuristic"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"AI analysis failed: {e}")
+        raise HTTPException(status_code=500, detail="Failed to generate AI analysis")
 
 
 @app.get("/api/odds/find")
@@ -768,70 +879,49 @@ async def get_live_odds():
 
 @app.get("/api/players/{player_id}/stats")
 async def get_player_stats(player_id: str, season: str = "2024-25"):
-    """Get detailed statistics for a specific player"""
+    """Get detailed statistics for a specific player.
+    When DB aggregates are not available, derive real stats from the external provider
+    instead of returning random mock values.
+    """
     try:
         supabase = app.state.supabase
-        if not supabase:
-            # External stats from balldontlie season averages
-            stats = await fetch_player_stats(player_id)
-            return {
-                "player": {"id": player_id},
-                "stats": stats or {},
-                "season": season,
-                "last_updated": datetime.now().isoformat()
-            }
 
-        # Get player info
-        player_response = await anyio.to_thread.run_sync(
-            lambda: supabase.table("players")
-            .select("""
-                *,
-                teams!players_team_id_fkey (
-                    abbreviation,
-                    full_name,
-                    city,
-                    name
+        player: dict | None = None
+        if supabase:
+            # Try to fetch player profile from DB for richer response (team info, etc.)
+            player_response = await anyio.to_thread.run_sync(
+                lambda: supabase.table("players")
+                .select(
+                    """
+                    *,
+                    teams!players_team_id_fkey (
+                        abbreviation,
+                        full_name,
+                        city,
+                        name
+                    )
+                    """
                 )
-            """)
-            .eq("id", player_id)
-            .execute()
-        )
+                .eq("id", player_id)
+                .execute()
+            )
+            if player_response.data:
+                player = player_response.data[0]
 
-        if not player_response.data:
-            raise HTTPException(status_code=404, detail=f"Player with ID '{player_id}' not found")
-
-        player = player_response.data[0]
-        
-        # TODO: Replace mock stats with real aggregated stats when available in DB
-        import random
-        mock_stats = {
-            "ppg": round(random.uniform(8.0, 32.0), 1),
-            "rpg": round(random.uniform(2.0, 14.0), 1),
-            "apg": round(random.uniform(1.5, 11.0), 1),
-            "fg_percentage": round(random.uniform(0.35, 0.65), 3),
-            "three_point_percentage": round(random.uniform(0.25, 0.45), 3),
-            "ft_percentage": round(random.uniform(0.65, 0.95), 3),
-            "steals": round(random.uniform(0.3, 2.5), 1),
-            "blocks": round(random.uniform(0.1, 3.0), 1),
-            "turnovers": round(random.uniform(1.0, 4.5), 1),
-            "minutes_per_game": round(random.uniform(15.0, 40.0), 1),
-            "games_played": random.randint(45, 82),
-            "field_goals_made": round(random.uniform(3.0, 12.0), 1),
-            "field_goals_attempted": round(random.uniform(7.0, 25.0), 1),
-            "three_pointers_made": round(random.uniform(0.5, 4.5), 1),
-            "three_pointers_attempted": round(random.uniform(1.5, 12.0), 1),
-            "free_throws_made": round(random.uniform(1.0, 8.0), 1),
-            "free_throws_attempted": round(random.uniform(1.5, 10.0), 1)
-        }
+        # Always compute stats from external provider for now (until DB aggregates exist)
+        stats = await fetch_player_stats(player_id)
 
         return {
-            "player": player,
-            "stats": mock_stats,
+            "player": player or {"id": player_id},
+            "stats": stats or {},
             "season": season,
-            "last_updated": datetime.now().isoformat()
+            "last_updated": datetime.now().isoformat(),
         }
     except HTTPException:
         raise
+    except ExternalAPIError as e:
+        logger.error(f"Upstream player stats provider error: {e}")
+        raise HTTPException(status_code=502, detail=f"Upstream player stats provider error: {e}")
     except Exception as e:
         logger.error(f"Error fetching player stats: {e}")
         raise HTTPException(status_code=500, detail="Failed to fetch player stats")
@@ -839,151 +929,86 @@ async def get_player_stats(player_id: str, season: str = "2024-25"):
 
 @app.get("/api/teams/{team_abbrev}/stats")
 async def get_team_stats(team_abbrev: str, season: str = "2024-25"):
-    """Get comprehensive team statistics and analysis"""
+    """Get comprehensive team statistics and analysis.
+    Replace previous mock values with real stats derived from recent games even when Supabase is available.
+    """
     try:
         supabase = app.state.supabase
-        if not supabase:
-            # Build real team stats from recent external games
+
+        # Resolve team basic info (from DB if available for richer metadata)
+        team: dict | None = None
+        if supabase:
+            team_response = await anyio.to_thread.run_sync(
+                lambda: supabase.table("teams")
+                .select("*")
+                .eq("abbreviation", team_abbrev.upper())
+                .execute()
+            )
+            if team_response.data:
+                team = team_response.data[0]
+
+        # Fallback to external teams list if not found in DB
+        if not team:
             teams = await fetch_nba_teams()
             team = next((t for t in teams if (t.get("abbreviation") or "").upper() == team_abbrev.upper()), None)
             if not team:
                 raise HTTPException(status_code=404, detail=f"Team '{team_abbrev}' not found")
 
-            # Fetch last 60 days games and compute last 10
-            end_date = datetime.now().date()
-            start_date = end_date - timedelta(days=60)
-            games = await fetch_nba_games(start_date=start_date.isoformat(), end_date=end_date.isoformat(), team_id=str(team.get("id")))
-            games = [g for g in games if g.get("home_team_score") is not None and g.get("visitor_team_score") is not None]
-            games.sort(key=lambda g: g.get("commence_time", ""), reverse=True)
-            last10 = games[:10]
+        # Build real team stats from recent external games (last 60 days, last 10 with scores)
+        end_date = datetime.now().date()
+        start_date = end_date - timedelta(days=60)
+        team_id = str(team.get("id")) if isinstance(team, dict) else str(team.get("id"))
+        games = await fetch_nba_games(start_date=start_date.isoformat(), end_date=end_date.isoformat(), team_id=team_id)
+        games = [g for g in games if g.get("home_team_score") is not None and g.get("visitor_team_score") is not None]
+        games.sort(key=lambda g: g.get("commence_time", ""), reverse=True)
+        last10 = games[:10]
 
-            wins = 0
-            losses = 0
-            pts = 0
-            opp_pts = 0
-            abbr = team_abbrev.upper()
-            for g in last10:
-                is_home = (g.get("home_team_abbreviation") or "") == abbr
-                home = g.get("home_team_score") or 0
-                away = g.get("visitor_team_score") or 0
-                team_pts = home if is_home else away
-                opp = away if is_home else home
-                pts += team_pts
-                opp_pts += opp
-                if team_pts > opp:
-                    wins += 1
-                else:
-                    losses += 1
-
-            cnt = max(1, len(last10))
-            ppg = round(pts / cnt, 1)
-            papg = round(opp_pts / cnt, 1)
-
-            team_stats = {
-                **team,
-                "conference": team.get("conference"),
-                "division": team.get("division"),
-                "season_stats": {
-                    "wins": wins,
-                    "losses": losses,
-                    "win_percentage": round(wins / (wins + losses), 3) if (wins + losses) else 0,
-                    "points_per_game": ppg,
-                    "points_allowed": papg,
-                    "offensive_rating": ppg,
-                    "defensive_rating": papg,
-                    "net_rating": round(ppg - papg, 1)
-                },
-                "recent_form": {
-                    "last_10": f"{wins}-{losses}"
-                },
-                "betting_stats": {
-                    "avg_total": round(((pts + opp_pts) / cnt), 1)
-                },
-                "last_updated": datetime.now().isoformat()
-            }
-            return team_stats
-
-        # Get team info
-        team_response = await anyio.to_thread.run_sync(
-            lambda: supabase.table("teams")
-            .select("*")
-            .eq("abbreviation", team_abbrev.upper())
-            .execute()
-        )
-
-        if not team_response.data:
-            raise HTTPException(status_code=404, detail=f"Team '{team_abbrev}' not found")
-
-        team = team_response.data[0]
-        
-    # Mock team stats - in production, these would come from scraping/DB metrics
-        import random
-        
-        # Determine conference and division
-        conferences = {
-            'Eastern': ['ATL', 'BOS', 'BKN', 'CHA', 'CHI', 'CLE', 'DET', 'IND', 'MIA', 'MIL', 'NYK', 'ORL', 'PHI', 'TOR', 'WAS'],
-            'Western': ['DAL', 'DEN', 'GSW', 'HOU', 'LAC', 'LAL', 'MEM', 'MIN', 'NOP', 'OKC', 'PHX', 'POR', 'SAC', 'SAS', 'UTA']
-        }
-        
-        divisions = {
-            'Atlantic': ['BOS', 'BKN', 'NYK', 'PHI', 'TOR'],
-            'Central': ['CHI', 'CLE', 'DET', 'IND', 'MIL'],
-            'Southeast': ['ATL', 'CHA', 'MIA', 'ORL', 'WAS'],
-            'Northwest': ['DEN', 'MIN', 'OKC', 'POR', 'UTA'],
-            'Pacific': ['GSW', 'LAC', 'LAL', 'PHX', 'SAC'],
-            'Southwest': ['DAL', 'HOU', 'MEM', 'NOP', 'SAS']
-        }
-        
+        wins = 0
+        losses = 0
+        pts = 0
+        opp_pts = 0
         abbr = team_abbrev.upper()
-        conference = 'Eastern' if abbr in conferences['Eastern'] else 'Western'
-        division = next((div for div, teams in divisions.items() if abbr in teams), 'Unknown')
-        
-        wins = random.randint(15, 55)
-        losses = random.randint(10, 50)
-        
+        for g in last10:
+            is_home = (g.get("home_team_abbreviation") or "") == abbr
+            home = g.get("home_team_score") or 0
+            away = g.get("visitor_team_score") or 0
+            team_pts = home if is_home else away
+            opp = away if is_home else home
+            pts += team_pts
+            opp_pts += opp
+            if team_pts > opp:
+                wins += 1
+            else:
+                losses += 1
+
+        cnt = max(1, len(last10))
+        ppg = round(pts / cnt, 1)
+        papg = round(opp_pts / cnt, 1)
+
         team_stats = {
             **team,
-            "conference": conference,
-            "division": division,
+            "conference": team.get("conference"),
+            "division": team.get("division"),
             "season_stats": {
                 "wins": wins,
                 "losses": losses,
-                "win_percentage": round(wins / (wins + losses), 3),
-                "points_per_game": round(random.uniform(105.0, 125.0), 1),
-                "points_allowed": round(random.uniform(105.0, 125.0), 1),
-                "offensive_rating": round(random.uniform(105.0, 125.0), 1),
-                "defensive_rating": round(random.uniform(105.0, 125.0), 1),
-                "net_rating": round(random.uniform(-15.0, 15.0), 1),
-                "field_goal_percentage": round(random.uniform(0.42, 0.52), 3),
-                "three_point_percentage": round(random.uniform(0.32, 0.42), 3),
-                "free_throw_percentage": round(random.uniform(0.72, 0.85), 3),
-                "rebounds_per_game": round(random.uniform(40.0, 50.0), 1),
-                "assists_per_game": round(random.uniform(20.0, 30.0), 1),
-                "steals_per_game": round(random.uniform(6.0, 10.0), 1),
-                "blocks_per_game": round(random.uniform(3.0, 7.0), 1),
-                "turnovers_per_game": round(random.uniform(12.0, 18.0), 1)
+                "win_percentage": round(wins / (wins + losses), 3) if (wins + losses) else 0,
+                "points_per_game": ppg,
+                "points_allowed": papg,
+                "offensive_rating": ppg,
+                "defensive_rating": papg,
+                "net_rating": round(ppg - papg, 1),
             },
-            "recent_form": {
-                "last_10": f"{random.randint(3, 8)}-{random.randint(2, 7)}",
-                "last_5": f"{random.randint(1, 5)}-{random.randint(0, 4)}",
-                "home_record": f"{random.randint(8, 30)}-{random.randint(5, 25)}",
-                "away_record": f"{random.randint(5, 25)}-{random.randint(10, 30)}",
-                "vs_conference": f"{random.randint(10, 30)}-{random.randint(10, 30)}"
-            },
-            "betting_stats": {
-                "ats_record": f"{random.randint(25, 40)}-{random.randint(20, 35)}",
-                "ats_percentage": round(random.uniform(0.45, 0.65), 3),
-                "over_under": f"{random.randint(25, 40)}-{random.randint(20, 35)}",
-                "ou_percentage": round(random.uniform(0.45, 0.65), 3),
-                "avg_total": round(random.uniform(210.0, 235.0), 1)
-            },
-            "strength_rating": random.randint(65, 95),
-            "last_updated": datetime.now().isoformat()
+            "recent_form": {"last_10": f"{wins}-{losses}"},
+            "betting_stats": {"avg_total": round(((pts + opp_pts) / cnt), 1)},
+            "last_updated": datetime.now().isoformat(),
         }
-
         return team_stats
     except HTTPException:
         raise
+    except ExternalAPIError as e:
+        logger.error(f"Upstream team stats provider error: {e}")
+        raise HTTPException(status_code=502, detail=f"Upstream team stats provider error: {e}")
     except Exception as e:
         logger.error(f"Error fetching team stats: {e}")
         raise HTTPException(status_code=500, detail="Failed to fetch team stats")
@@ -1899,6 +1924,156 @@ async def get_team_analysis(team_abbrev: str):
     except Exception as e:
         logger.error(f"Error fetching team analysis for {team_abbrev}: {e}")
         raise HTTPException(status_code=500, detail="Failed to fetch team analysis")
+
+
+@app.get("/api/teams/{team_abbrev}/timeseries")
+async def get_team_timeseries(team_abbrev: str, metric: str = "net", games: int = 20):
+    """Return a simple timeseries for a team from recent games.
+    metric: one of ppg|papg|net|margin. Returns array of {date, ppg, papg, net, margin}.
+    """
+    try:
+        abbr = team_abbrev.upper()
+        games = max(5, min(int(games or 20), 60))
+        teams = await fetch_nba_teams()
+        team = next((t for t in teams if (t.get('abbreviation') or '').upper() == abbr), None)
+        if not team:
+            raise HTTPException(status_code=404, detail=f"Team '{abbr}' not found")
+        end_date = datetime.now().date()
+        start_date = end_date - timedelta(days=120)
+        raw = await fetch_nba_games(start_date=start_date.isoformat(), end_date=end_date.isoformat(), team_id=str(team.get('id')))
+        raw = [g for g in raw if g.get('home_team_score') is not None and g.get('visitor_team_score') is not None]
+        raw.sort(key=lambda g: g.get('commence_time', ''))
+        series = []
+        for g in raw[-games:]:
+            is_home = (g.get('home_team_abbreviation') or '') == abbr
+            hs = g.get('home_team_score') or 0
+            as_ = g.get('visitor_team_score') or 0
+            team_score = hs if is_home else as_
+            opp_score = as_ if is_home else hs
+            ppg = float(team_score)
+            papg = float(opp_score)
+            net = round(ppg - papg, 1)
+            series.append({
+                'date': (g.get('commence_time') or '')[:10],
+                'ppg': ppg,
+                'papg': papg,
+                'net': net,
+                'margin': team_score - opp_score,
+            })
+        return {'team': abbr, 'series': series, 'count': len(series)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error building team timeseries for {team_abbrev}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch team timeseries")
+
+
+@app.get("/api/teams/{team_abbrev}/next-game")
+async def get_team_next_game(team_abbrev: str):
+    """Return the next scheduled game for a team (soonest game from now).
+    Response: { team, abbr, opponent, opponent_abbr, commence_time, home }
+    """
+    try:
+        abbr = team_abbrev.upper()
+        teams = await fetch_nba_teams()
+        team = next((t for t in teams if (t.get('abbreviation') or '').upper() == abbr), None)
+        if not team:
+            raise HTTPException(status_code=404, detail=f"Team '{abbr}' not found")
+
+        now = datetime.now()
+        start_date = now.date().isoformat()
+        end_date = (now.date() + timedelta(days=21)).isoformat()
+        games = await fetch_nba_games(start_date=start_date, end_date=end_date, team_id=str(team.get('id')))
+        # future games only
+        fut = []
+        for g in games:
+            ct = g.get('commence_time')
+            if not ct:
+                continue
+            try:
+                when = datetime.fromisoformat(ct.replace('Z', '+00:00'))
+            except Exception:
+                when = datetime.fromisoformat(ct[:19]) if len(ct) >= 19 else now
+            if when >= now:
+                fut.append((when, g))
+        if not fut:
+            return {"team": team.get('full_name') or abbr, "abbr": abbr, "next_game": None}
+        fut.sort(key=lambda x: x[0])
+        when, g = fut[0]
+        is_home = (g.get('home_team_abbreviation') or '').upper() == abbr
+        opp_abbr = (g.get('away_team_abbreviation') if is_home else g.get('home_team_abbreviation')) or ''
+        opp_full = (g.get('away_team') if is_home else g.get('home_team')) or opp_abbr
+        return {
+            "team": team.get('full_name') or abbr,
+            "abbr": abbr,
+            "opponent": opp_full,
+            "opponent_abbr": opp_abbr,
+            "commence_time": when.isoformat(),
+            "home": is_home,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching next game for {team_abbrev}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch next game")
+
+
+@app.get("/api/teams/{team_abbrev}/last-game")
+async def get_team_last_game(team_abbrev: str):
+    """Return the most recent finished game for a team.
+    Response: { team, abbr, opponent, opponent_abbr, date, home, team_score, opp_score, result }
+    """
+    try:
+        abbr = team_abbrev.upper()
+        teams = await fetch_nba_teams()
+        team = next((t for t in teams if (t.get('abbreviation') or '').upper() == abbr), None)
+        if not team:
+            raise HTTPException(status_code=404, detail=f"Team '{abbr}' not found")
+
+        now = datetime.now()
+        start_date = (now.date() - timedelta(days=60)).isoformat()
+        end_date = now.date().isoformat()
+        games = await fetch_nba_games(start_date=start_date, end_date=end_date, team_id=str(team.get('id')))
+        # past games with scores
+        past = []
+        for g in games:
+            ct = g.get('commence_time')
+            if not ct:
+                continue
+            try:
+                when = datetime.fromisoformat(ct.replace('Z', '+00:00'))
+            except Exception:
+                when = datetime.fromisoformat(ct[:19]) if len(ct) >= 19 else now
+            if when <= now and g.get('home_team_score') is not None and g.get('visitor_team_score') is not None:
+                past.append((when, g))
+        if not past:
+            return {"team": team.get('full_name') or abbr, "abbr": abbr, "last_game": None}
+        past.sort(key=lambda x: x[0], reverse=True)
+        when, g = past[0]
+        is_home = (g.get('home_team_abbreviation') or '').upper() == abbr
+        hs = int(g.get('home_team_score') or 0)
+        as_ = int(g.get('visitor_team_score') or 0)
+        team_score = hs if is_home else as_
+        opp_score = as_ if is_home else hs
+        opp_abbr = (g.get('away_team_abbreviation') if is_home else g.get('home_team_abbreviation')) or ''
+        opp_full = (g.get('away_team') if is_home else g.get('home_team')) or opp_abbr
+        result = 'W' if team_score >= opp_score else 'L'
+        return {
+            "team": team.get('full_name') or abbr,
+            "abbr": abbr,
+            "opponent": opp_full,
+            "opponent_abbr": opp_abbr,
+            "date": when.date().isoformat(),
+            "home": is_home,
+            "team_score": team_score,
+            "opp_score": opp_score,
+            "result": result,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching last game for {team_abbrev}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch last game")
 
 
 @app.get("/health")

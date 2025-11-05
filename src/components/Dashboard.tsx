@@ -27,7 +27,7 @@ interface ApiGame {
 }
 
 interface ApiTeam {
-  id: string;
+  id?: string | number;
   name?: string;
   abbreviation: string;
   full_name?: string;

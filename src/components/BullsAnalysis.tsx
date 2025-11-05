@@ -4,6 +4,7 @@ import { Target, TrendingUp, TrendingDown, Users, Activity, Clock, AlertTriangle
 import { useApi } from '../services/api';
 
 interface Player {
+  id?: string;
   name: string;
   position: string;
   stats: {
@@ -54,7 +55,9 @@ const BullsAnalysis: React.FC = () => {
   const [players, setPlayers] = useState<Player[]>([]);
   const [nextGame, setNextGame] = useState<GameAnalysis | null>(null);
   const [teamStats, setTeamStats] = useState<TeamStatsUI | null>(null);
+  const [aiCommentary, setAiCommentary] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [liveActive, setLiveActive] = useState<boolean>(false);
   // Odds finder state
   const [homeAbbr, setHomeAbbr] = useState<string>('CHI');
   const [awayAbbr, setAwayAbbr] = useState<string>('');
@@ -75,30 +78,47 @@ const BullsAnalysis: React.FC = () => {
       
       try {
         // Fetch real Bulls data from API
-        const [bullsPlayersData, bullsAnalysisData, bullsTeamStats, todayGames] = await Promise.all([
+        const [bullsPlayersData, bullsTeamStats, todayGames] = await Promise.all([
           apiHook.getBullsPlayers(),
-          apiHook.getBullsAnalysis().catch(() => null), // Optional - fallback if analysis not available
           apiHook.getTeamStats('CHI').catch(() => null),
           apiHook.getTodayGames().catch(() => [])
         ]);
         
         // Transform Bulls players data to match Player interface
-        const transformedPlayers = bullsPlayersData.slice(0, 5).map((player: Record<string, any>) => ({
-          name: player.name || 'Unknown',
-          position: player.position || 'N/A',
-          stats: {
-            ppg: 0, // Mock - would need additional stats endpoint
-            rpg: 0, // Mock - would need additional stats endpoint
-            apg: 0, // Mock - would need additional stats endpoint
-            fgPct: 0, // Mock - would need additional stats endpoint
-            ftPct: 0  // Mock - would need additional stats endpoint
-          },
-          form: 'good' as const,
-          minutes: 0, // Mock - would need additional stats endpoint
-          role: player.position || 'Player',
-          trend: 'stable' as const
-        }));
-        
+        // Fetch per-player stats for top 5 players (if available)
+        const top = bullsPlayersData.slice(0, 5);
+        const transformedPlayers: Player[] = [];
+        for (const p of top) {
+          const pid = String(p.id ?? p.player_id ?? '');
+          let stats = { ppg: 0, rpg: 0, apg: 0, fgPct: 0, ftPct: 0 };
+          try {
+            if (pid) {
+              const resp = await apiHook.getPlayerStats(pid);
+              const s: any = resp?.stats || {};
+              // Map flexible fields from provider
+              stats = {
+                ppg: Number(s.ppg ?? s.points_per_game ?? 0),
+                rpg: Number(s.rpg ?? s.rebounds_per_game ?? 0),
+                apg: Number(s.apg ?? s.assists_per_game ?? 0),
+                fgPct: Number(s.fg_pct ?? s.field_goal_pct ?? 0),
+                ftPct: Number(s.ft_pct ?? s.free_throw_pct ?? 0),
+              };
+            }
+          } catch {
+            // ignore per-player failure
+          }
+          transformedPlayers.push({
+            id: pid || undefined,
+            name: p.name || 'Unknown',
+            position: p.position || 'N/A',
+            stats,
+            form: 'good',
+            minutes: Number(p.minutes || 0),
+            role: p.position || 'Player',
+            trend: 'stable',
+          });
+        }
+
         setPlayers(transformedPlayers);
 
         // Map team stats (real data) to UI structure
@@ -181,10 +201,17 @@ const BullsAnalysis: React.FC = () => {
           }
         }
 
-        // If we got Bulls analysis data, use it; otherwise use mock data
-        if (bullsAnalysisData) {
-          // Use real analysis data structure here
-          console.log('Bulls analysis data:', bullsAnalysisData);
+        // AI commentary (Gemini if configured, heuristic otherwise)
+        try {
+          const ai = await apiHook.getAiTeamAnalysis('CHI', 'Bulls');
+          if (ai && (ai as any).analysis) setAiCommentary((ai as any).analysis);
+        } catch {
+          /* ignore */
+        }
+
+        // Mark live data as active if we have any meaningful real data
+        if ((transformedPlayers.length > 0) || (bullsTeamStats && bullsTeamStats.season_stats)) {
+          setLiveActive(true);
         }
         
       } catch (error) {
@@ -345,6 +372,18 @@ const BullsAnalysis: React.FC = () => {
 
   return (
     <div className="space-y-6">
+      {/* AI Commentary */}
+      {aiCommentary && (
+        <div className="glass-card border border-blue-600/20">
+          <div className="p-6 border-b border-gray-700/50">
+            <h3 className="text-xl font-bold text-white flex items-center space-x-2">
+              <Activity className="w-5 h-5 text-blue-400" />
+              <span>AI Komentarz</span>
+            </h3>
+          </div>
+          <div className="p-6 text-gray-200 whitespace-pre-wrap text-sm leading-relaxed">{aiCommentary}</div>
+        </div>
+      )}
       {/* Team Overview */}
       <div className="glass-card">
         <div className="p-6 border-b border-gray-700/50">
@@ -355,8 +394,8 @@ const BullsAnalysis: React.FC = () => {
             <span>Chicago Bulls Analysis</span>
             {/* Preserve legacy heading for tests */}
             <span className="sr-only">Bulls Analytics</span>
-            <div className="ml-auto flex items-center space-x-2">
-              <div className="w-2 h-2 bg-red-500 rounded-full animate-pulse"></div>
+            <div className="ml-auto flex items-center space-x-2" title={liveActive ? 'Live data active' : 'Brak aktywnych danych'}>
+              <div className={`w-2 h-2 rounded-full ${liveActive ? 'bg-green-500 animate-pulse' : 'bg-gray-500'}`}></div>
               <span className="text-sm text-gray-400">Live Data</span>
             </div>
           </h2>
@@ -484,12 +523,17 @@ const BullsAnalysis: React.FC = () => {
                 <div key={index} className="glass-card p-4 hover:bg-white/5 transition-colors">
                   <div className="flex items-center justify-between mb-3">
                     <div className="flex items-center space-x-3">
-                      <div className="w-12 h-12 bg-red-600/20 rounded-lg flex items-center justify-center">
-                        <span className="text-red-400 font-bold text-sm">{player.position}</span>
-                      </div>
+                      <img
+                        src={player.id ? `https://cdn.nba.com/headshots/nba/latest/260x190/${player.id}.png` : `https://ui-avatars.com/api/?name=${encodeURIComponent(player.name)}&size=80&background=random&color=fff`}
+                        alt={player.name}
+                        className="w-12 h-12 rounded-lg object-cover border border-gray-700"
+                        onError={(e) => {
+                          (e.target as HTMLImageElement).src = `https://ui-avatars.com/api/?name=${encodeURIComponent(player.name)}&size=80&background=random&color=fff`;
+                        }}
+                      />
                       <div>
                         <div className="font-semibold text-white">{player.name}</div>
-                        <div className="text-sm text-gray-400">{player.role}</div>
+                        <div className="text-sm text-gray-400">{player.role} • {player.position}</div>
                       </div>
                     </div>
                     <div className="flex items-center space-x-2">

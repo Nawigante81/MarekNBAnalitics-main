@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Clock, Home, Activity, Target, Calendar } from 'lucide-react';
-import { useApi } from '../services/api';
+import { useApi, api } from '../services/api';
 
 interface GameInfo {
   opponent: string;
@@ -37,63 +37,71 @@ const Footer: React.FC = () => {
         // Fetch today's games to check for Bulls and Lakers
         const todayGames = await apiHook.getTodayGames();
         
-        // Check for Bulls game tonight
-        const bullsGameTonight = todayGames.find((game: Record<string, unknown>) => 
-          (game.home_team as string)?.includes('Bulls') || (game.away_team as string)?.includes('Bulls')
+        // Check for Bulls and Lakers games tonight using today's schedule
+        const bullsGameTonight = todayGames.find((game: any) => 
+          (game.home_team || '').includes('Bulls') || (game.away_team || '').includes('Bulls')
         );
-        
-        // Check for Lakers game tonight
-        const lakersGameTonight = todayGames.find((game: Record<string, unknown>) => 
-          (game.home_team as string)?.includes('Lakers') || (game.away_team as string)?.includes('Lakers')
+        const lakersGameTonight = todayGames.find((game: any) => 
+          (game.home_team || '').includes('Lakers') || (game.away_team || '').includes('Lakers')
         );
-        
+
+        // Next Bulls game (real): if tonight, use today's game; else ask backend for the next game
         if (bullsGameTonight) {
-          const isBullsHome = bullsGameTonight.home_team?.includes('Bulls');
+          const isHome = (bullsGameTonight.home_team || '').includes('Bulls');
+          const when = bullsGameTonight.commence_time ? new Date(bullsGameTonight.commence_time) : null;
           setNextBullsGame({
-            opponent: isBullsHome ? bullsGameTonight.away_team : bullsGameTonight.home_team,
+            opponent: isHome ? bullsGameTonight.away_team : bullsGameTonight.home_team,
             date: 'Tonight',
-            time: bullsGameTonight.commence_time ? new Date(bullsGameTonight.commence_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '8:00 PM',
-            location: isBullsHome ? 'home' : 'away',
-            venue: isBullsHome ? 'United Center' : 'Away',
-            spread: -2.5, // Mock - would come from odds API
-            total: 225.5, // Mock - would come from odds API
+            time: when ? when.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '-',
+            location: isHome ? 'home' : 'away',
+            venue: isHome ? 'Home' : 'Away',
             isTonight: true
           });
         } else {
-          // Mock next Bulls game if not tonight
-          setNextBullsGame({
-            opponent: 'Miami Heat',
-            date: 'Nov 5',
-            time: '7:30 PM',
-            location: 'away',
-            venue: 'FTX Arena',
-            spread: 1.5,
-            total: 220.0,
-            isTonight: false
-          });
+          const next = await api.teams.getNextGame('CHI');
+          if ((next as any).next_game === null || !next.commence_time) {
+            setNextBullsGame(null);
+          } else {
+            const when = new Date(next.commence_time as string);
+            const todayStr = new Date().toDateString();
+            const isTonight = when.toDateString() === todayStr;
+            setNextBullsGame({
+              opponent: next.opponent || '-',
+              date: isTonight ? 'Tonight' : when.toLocaleDateString([], { month: 'short', day: 'numeric' }),
+              time: when.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+              location: next.home ? 'home' : 'away',
+              venue: next.home ? 'Home' : 'Away',
+              isTonight
+            });
+          }
         }
-        
+
+        // Lakers tonight (real) — show only if they play today
         if (lakersGameTonight) {
-          const isLakersHome = lakersGameTonight.home_team?.includes('Lakers');
+          const isHome = (lakersGameTonight.home_team || '').includes('Lakers');
+          const when = lakersGameTonight.commence_time ? new Date(lakersGameTonight.commence_time) : null;
           setLakersTonight({
-            opponent: isLakersHome ? lakersGameTonight.away_team : lakersGameTonight.home_team,
+            opponent: isHome ? lakersGameTonight.away_team : lakersGameTonight.home_team,
             date: 'Tonight',
-            time: lakersGameTonight.commence_time ? new Date(lakersGameTonight.commence_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '10:30 PM',
-            location: isLakersHome ? 'home' : 'away',
-            venue: isLakersHome ? 'Crypto.com Arena' : 'Away',
-            spread: 3.5, // Mock
-            total: 228.5, // Mock
+            time: when ? when.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '-',
+            location: isHome ? 'home' : 'away',
+            venue: isHome ? 'Home' : 'Away',
             isTonight: true
           });
+        } else {
+          setLakersTonight(null);
         }
-        
-        // Mock last Bulls game result
-        setLastBullsGame({
-          opponent: 'Detroit Pistons',
-          result: 'W',
-          score: '112-108',
-          date: 'Nov 1'
-        });
+
+        // Last Bulls game (real)
+        const last = await api.teams.getLastGame('CHI');
+        if (!(last as any).last_game && last.date) {
+          setLastBullsGame({
+            opponent: last.opponent || '-',
+            result: (last.result as 'W' | 'L') || 'W',
+            score: `${last.team_score ?? 0}-${last.opp_score ?? 0}`,
+            date: new Date(last.date as string).toLocaleDateString([], { month: 'short', day: 'numeric' })
+          });
+        }
         
         // Mock Bulls status - would come from injury report API
         setBullsStatus('active');
@@ -101,35 +109,10 @@ const Footer: React.FC = () => {
       } catch (error) {
         console.error('Error fetching footer data:', error);
         
-        // Fallback mock data
-        setNextBullsGame({
-          opponent: 'Los Angeles Lakers',
-          date: 'Tonight',
-          time: '8:00 PM',
-          location: 'home',
-          venue: 'United Center',
-          spread: -2.5,
-          total: 225.5,
-          isTonight: true
-        });
-        
-        setLakersTonight({
-          opponent: 'Chicago Bulls',
-          date: 'Tonight', 
-          time: '8:00 PM',
-          location: 'away',
-          venue: 'United Center',
-          spread: 2.5,
-          total: 225.5,
-          isTonight: true
-        });
-        
-        setLastBullsGame({
-          opponent: 'Detroit Pistons',
-          result: 'W', 
-          score: '112-108',
-          date: 'Nov 1'
-        });
+        // Fallbacks: clear or minimal when failing
+        setNextBullsGame(null);
+        setLakersTonight(null);
+        setLastBullsGame(null);
       }
       
       setLoading(false);

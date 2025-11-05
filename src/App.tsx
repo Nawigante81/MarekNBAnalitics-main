@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Zap, BarChart3, FileText, Users, DollarSign, TrendingUp, Activity } from 'lucide-react';
+import { Zap, BarChart3, FileText, Users, DollarSign, TrendingUp, Activity, LineChart, BarChart, Target, AlertTriangle } from 'lucide-react';
 
 import Dashboard from './components/Dashboard';
 import Sidebar from './components/Sidebar';
@@ -10,8 +10,18 @@ import BullsAnalysis from './components/BullsAnalysis';
 import BettingRecommendations from './components/BettingRecommendations';
 import LiveOdds from './components/LiveOdds';
 import PlayersBrowser from './components/PlayersBrowser';
+import Roster from './components/Roster.tsx';
+import Line from './components/Line.tsx';
+import Trend from './components/Trend.tsx';
+import Statistic from './components/Statistic.tsx';
+import FormView from './components/Form.tsx';
+import Ranking from './components/Ranking.tsx';
+import Risk from './components/Risk.tsx';
+import ChartView from './components/Chart.tsx';
+import LeagueTrends from './components/LeagueTrends.tsx';
 
-type Section = 'dashboard' | 'reports' | 'bulls' | 'betting' | 'odds' | 'analytics' | 'players';
+type Section = 'dashboard' | 'reports' | 'bulls' | 'betting' | 'odds' | 'analytics' | 'players'
+  | 'roster' | 'line' | 'trend' | 'statistic' | 'form' | 'ranking' | 'risk' | 'chart';
 
 function App() {
   const [activeSection, setActiveSection] = useState<Section>('dashboard');
@@ -24,6 +34,14 @@ function App() {
     { id: 'betting', label: 'Betting', icon: DollarSign },
     { id: 'odds', label: 'Live Odds', icon: TrendingUp },
     { id: 'players', label: 'Zawodnicy', icon: Users },
+  { id: 'roster', label: 'Roster', icon: Users },
+    { id: 'line', label: 'Line', icon: LineChart },
+    { id: 'trend', label: 'Trend', icon: TrendingUp },
+  { id: 'statistic', label: 'Statistic', icon: BarChart },
+    { id: 'form', label: 'Form', icon: Target },
+    { id: 'ranking', label: 'Ranking', icon: BarChart3 },
+    { id: 'risk', label: 'Risk', icon: AlertTriangle },
+    { id: 'chart', label: 'Chart', icon: Activity },
     { id: 'analytics', label: 'Analytics', icon: Activity }
   ];
   const [isLoading, setIsLoading] = useState(true);
@@ -82,8 +100,24 @@ function App() {
         return <LiveOdds selectedGameId={selectedGameId || undefined} />;
       case 'players':
         return <PlayersBrowser />;
+      case 'roster':
+        return <Roster />;
+      case 'line':
+        return <Line />;
+      case 'trend':
+        return <Trend />;
+      case 'statistic':
+        return <Statistic />;
+      case 'form':
+        return <FormView />;
+      case 'ranking':
+        return <Ranking />;
+      case 'risk':
+        return <Risk />;
+      case 'chart':
+        return <ChartView />;
       case 'analytics':
-        return <Dashboard />;
+        return <LeagueTrends />;
       default:
         return <Dashboard />;
     }

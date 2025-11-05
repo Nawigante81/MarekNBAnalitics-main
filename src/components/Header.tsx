@@ -70,7 +70,6 @@ const Header: React.FC<HeaderProps> = ({ activeSection, lastUpdate, onRefresh })
               setShowProfile(false);
             }}
             aria-haspopup="true"
-            aria-expanded={showNotifications}
             title="Notifications"
           >
             <Bell className="w-5 h-5 text-gray-400 hover:text-white" />
@@ -115,7 +114,6 @@ const Header: React.FC<HeaderProps> = ({ activeSection, lastUpdate, onRefresh })
               setShowProfile(false);
             }}
             aria-haspopup="true"
-            aria-expanded={showSettings}
             title="Settings"
           >
             <Settings className="w-5 h-5 text-gray-400 hover:text-white" />
@@ -160,7 +158,6 @@ const Header: React.FC<HeaderProps> = ({ activeSection, lastUpdate, onRefresh })
               setShowSettings(false);
             }}
             aria-haspopup="true"
-            aria-expanded={showProfile}
             title="Profile"
           >
             <Users className="w-5 h-5 text-gray-400" />

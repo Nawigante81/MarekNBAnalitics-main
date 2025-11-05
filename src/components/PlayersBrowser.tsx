@@ -61,7 +61,7 @@ const PlayersBrowser: React.FC = () => {
         
         // Fetch stats for each player
         const playersWithStats = await Promise.all(
-          (playersResponse.players || []).map(async (player: any) => {
+          (playersResponse.players || []).map(async (player: Player) => {
             try {
               const statsResponse = await api.players.getStats(player.id);
               return {
@@ -186,6 +186,8 @@ const PlayersBrowser: React.FC = () => {
                 value={selectedTeam}
                 onChange={(e) => setSelectedTeam(e.target.value)}
                 className="bg-gray-700/50 border border-gray-600 rounded-lg px-3 py-2 text-white text-sm focus:border-blue-400 focus:outline-none"
+                aria-label="Filtr drużyny"
+                title="Wybierz drużynę"
               >
                 {teams.map(team => (
                   <option key={team.abbreviation} value={team.abbreviation}>
@@ -199,6 +201,8 @@ const PlayersBrowser: React.FC = () => {
               value={selectedPosition}
               onChange={(e) => setSelectedPosition(e.target.value)}
               className="bg-gray-700/50 border border-gray-600 rounded-lg px-3 py-2 text-white text-sm focus:border-blue-400 focus:outline-none"
+              aria-label="Filtr pozycji"
+              title="Wybierz pozycję"
             >
               {positions.map(pos => (
                 <option key={pos} value={pos}>{pos === 'All' ? 'Wszystkie pozycje' : pos}</option>
@@ -409,6 +413,8 @@ const PlayersBrowser: React.FC = () => {
               <button
                 onClick={() => setSelectedPlayer(null)}
                 className="p-2 hover:bg-white/10 rounded transition-colors"
+                aria-label="Zamknij szczegóły zawodnika"
+                title="Zamknij"
               >
                 <X className="w-6 h-6 text-gray-400" />
               </button>

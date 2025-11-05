@@ -70,55 +70,9 @@ const AllTeams: React.FC<AllTeamsProps> = ({ onTeamSelect, preselectTeamAbbrev }
     const fetchTeams = async () => {
       try {
         setLoading(true);
-        
-        // Get basic teams data
-        const teamsResponse = await api.teams.getAll();
-        const basicTeams = teamsResponse.teams || [];
-        
-        // Fetch detailed stats for each team
-        const teamsWithStats = await Promise.all(
-          basicTeams.map(async (team: any) => {
-            try {
-              const statsResponse = await api.teams.getStats(team.abbreviation);
-              return statsResponse;
-            } catch (error) {
-              console.error(`Error fetching stats for team ${team.abbreviation}:`, error);
-              // Return basic team data if stats fetch fails
-              return {
-                ...team,
-                conference: 'Unknown',
-                division: 'Unknown',
-                season_stats: {
-                  wins: 0,
-                  losses: 0,
-                  win_percentage: 0,
-                  points_per_game: 0,
-                  points_allowed: 0,
-                  offensive_rating: 0,
-                  defensive_rating: 0,
-                  net_rating: 0
-                },
-                recent_form: {
-                  last_10: '0-0',
-                  last_5: '0-0',
-                  home_record: '0-0',
-                  away_record: '0-0',
-                  vs_conference: '0-0'
-                },
-                betting_stats: {
-                  ats_record: '0-0',
-                  ats_percentage: 0,
-                  over_under: '0-0',
-                  ou_percentage: 0,
-                  avg_total: 0
-                },
-                strength_rating: 0
-              };
-            }
-          })
-        );
-        
-        setTeams(teamsWithStats);
+        // Use backend aggregated endpoint to avoid N+1 requests per team
+        const analysis = await api.teams.getAllAnalysis();
+        setTeams((analysis.teams || []) as unknown as Team[]);
       } catch (error) {
         console.error('Error fetching teams:', error);
       } finally {
@@ -127,7 +81,6 @@ const AllTeams: React.FC<AllTeamsProps> = ({ onTeamSelect, preselectTeamAbbrev }
     };
 
     fetchTeams();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // Run only once on mount
 
   // Preselect team when requested and teams are loaded
@@ -402,6 +355,8 @@ const AllTeams: React.FC<AllTeamsProps> = ({ onTeamSelect, preselectTeamAbbrev }
               <select
                 value={selectedConference}
                 onChange={(e) => setSelectedConference(e.target.value)}
+                aria-label="Filter by conference"
+                title="Filter by conference"
                 className="bg-gray-700/50 border border-gray-600 rounded-lg px-3 py-2 text-white text-sm focus:border-blue-400 focus:outline-none"
               >
                 {conferences.map(conf => (
@@ -413,6 +368,8 @@ const AllTeams: React.FC<AllTeamsProps> = ({ onTeamSelect, preselectTeamAbbrev }
             <select
               value={selectedDivision}
               onChange={(e) => setSelectedDivision(e.target.value)}
+              aria-label="Filter by division"
+              title="Filter by division"
               className="bg-gray-700/50 border border-gray-600 rounded-lg px-3 py-2 text-white text-sm focus:border-blue-400 focus:outline-none"
             >
               {divisions.map(div => (
@@ -425,6 +382,8 @@ const AllTeams: React.FC<AllTeamsProps> = ({ onTeamSelect, preselectTeamAbbrev }
               <select
                 value={sortBy}
                 onChange={(e) => setSortBy(e.target.value)}
+                aria-label="Sort teams by"
+                title="Sort teams by"
                 className="bg-gray-700/50 border border-gray-600 rounded-lg px-3 py-2 text-white text-sm focus:border-blue-400 focus:outline-none"
               >
                 <option value="win_percentage">Win %</option>

@@ -73,6 +73,45 @@ export interface LiveOddsGame {
   bookmakers: LiveOddsBookmaker[];
 }
 
+// Time series types
+export interface TeamTimeSeriesPoint {
+  date: string;
+  ppg: number;
+  papg: number;
+  net: number;
+  margin: number;
+}
+
+export interface TeamTimeSeriesResponse {
+  team: string;
+  series: TeamTimeSeriesPoint[];
+  count: number;
+}
+
+// Team schedule/result types
+export interface TeamNextGameResponse {
+  team: string;
+  abbr: string;
+  opponent?: string;
+  opponent_abbr?: string;
+  commence_time?: string;
+  home?: boolean;
+  next_game?: null; // when not found
+}
+
+export interface TeamLastGameResponse {
+  team: string;
+  abbr: string;
+  opponent?: string;
+  opponent_abbr?: string;
+  date?: string;
+  home?: boolean;
+  team_score?: number;
+  opp_score?: number;
+  result?: 'W' | 'L';
+  last_game?: null; // when not found
+}
+
 // ===== Teams API =====
 export const teamsApi = {
   getAll: () => apiRequest<{ teams: TeamSummary[] }>("/api/teams"),
@@ -106,6 +145,26 @@ export const teamsApi = {
     if (team3) params.append("team3", team3);
     return apiRequest<any>(`/api/teams/compare?${params}`);
   },
+
+  getTimeSeries: (
+    teamAbbrev: string,
+    metric: "ppg" | "papg" | "net" | "margin" = "net",
+    games: number = 20
+  ) => {
+    const params = new URLSearchParams();
+    if (metric) params.set("metric", metric);
+    if (games) params.set("games", String(games));
+    const query = params.toString() ? `?${params}` : "";
+    return apiRequest<TeamTimeSeriesResponse>(
+      `/api/teams/${teamAbbrev}/timeseries${query}`
+    );
+  },
+
+  getNextGame: (teamAbbrev: string) =>
+    apiRequest<TeamNextGameResponse>(`/api/teams/${teamAbbrev}/next-game`),
+
+  getLastGame: (teamAbbrev: string) =>
+    apiRequest<TeamLastGameResponse>(`/api/teams/${teamAbbrev}/last-game`),
 };
 
 // ===== Players API =====
@@ -201,6 +260,18 @@ export const bettingApi = {
     }),
 };
 
+// ===== AI API =====
+export const aiApi = {
+  analyzeTeam: (teamAbbrev: string, focus?: string) =>
+    apiRequest<{ team: string; abbr: string; analysis: string; model: string }>(
+      "/api/ai/analysis",
+      {
+        method: "POST",
+        body: JSON.stringify({ team_abbr: teamAbbrev, focus }),
+      }
+    ),
+};
+
 // ===== System API =====
 export const systemApi = {
   getHealth: () => apiRequest<{ status: string; timestamp: string }>("/health"),
@@ -223,6 +294,7 @@ export const api = {
   reports: reportsApi,
   bulls: bullsApi,
   betting: bettingApi,
+  ai: aiApi,
   system: systemApi,
 };
 
@@ -347,6 +419,24 @@ export function useApi() {
         } catch (error) {
           console.error("Failed to find game odds:", error);
           return { game: null, odds: [], source: "external_odds" };
+        }
+      },
+
+      async getTeamTimeSeries(teamAbbrev: string, metric: "ppg" | "papg" | "net" | "margin" = "net", games: number = 20) {
+        try {
+          return await api.teams.getTimeSeries(teamAbbrev, metric, games);
+        } catch (error) {
+          console.error(`Failed to fetch time series for team ${teamAbbrev}:`, error);
+          return { team: teamAbbrev, series: [], count: 0 } as TeamTimeSeriesResponse;
+        }
+      },
+
+      async getAiTeamAnalysis(teamAbbrev: string, focus?: string) {
+        try {
+          return await api.ai.analyzeTeam(teamAbbrev, focus);
+        } catch (error) {
+          console.error("Failed to generate AI analysis:", error);
+          return null;
         }
       },
     }),
