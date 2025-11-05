@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import React, { useState, useEffect } from 'react';
 import { Target, TrendingUp, TrendingDown, Users, Activity, Clock, AlertTriangle } from 'lucide-react';
 import { useApi } from '../services/api';
@@ -37,10 +38,20 @@ interface GameAnalysis {
   }[];
 }
 
+type TeamStatsUI = {
+  record: { wins: number; losses: number };
+  ats: { covers: number; misses: number };
+  ou: { overs: number; unders: number };
+  last5: { wins: number; losses: number };
+  homeRecord?: { wins: number; losses: number };
+  awayRecord?: { wins: number; losses: number };
+  trends?: Record<string, { value: number; trend: 'up' | 'down' | 'stable'; change: string }>;
+};
+
 const BullsAnalysis: React.FC = () => {
   const [players, setPlayers] = useState<Player[]>([]);
   const [nextGame, setNextGame] = useState<GameAnalysis | null>(null);
-  const [teamStats, setTeamStats] = useState<Record<string, any> | null>(null);
+  const [teamStats, setTeamStats] = useState<TeamStatsUI | null>(null);
   const [loading, setLoading] = useState(true);
   
   const apiHook = useApi();
@@ -51,9 +62,10 @@ const BullsAnalysis: React.FC = () => {
       
       try {
         // Fetch real Bulls data from API
-        const [bullsPlayersData, bullsAnalysisData] = await Promise.all([
+        const [bullsPlayersData, bullsAnalysisData, bullsTeamStats] = await Promise.all([
           apiHook.getBullsPlayers(),
-          apiHook.getBullsAnalysis().catch(() => null) // Optional - fallback if analysis not available
+          apiHook.getBullsAnalysis().catch(() => null), // Optional - fallback if analysis not available
+          apiHook.getTeamStats('CHI').catch(() => null)
         ]);
         
         // Transform Bulls players data to match Player interface
@@ -74,6 +86,27 @@ const BullsAnalysis: React.FC = () => {
         }));
         
         setPlayers(transformedPlayers);
+
+        // Map team stats (real data) to UI structure
+        if (bullsTeamStats && bullsTeamStats.season_stats) {
+          const wins = Number(bullsTeamStats.season_stats.wins || 0);
+          const losses = Number(bullsTeamStats.season_stats.losses || 0);
+          // Parse last_10 like "6-4"
+          const last10 = bullsTeamStats.recent_form?.last_10 || '0-0';
+          const [w10Str] = last10.split('-');
+          const w10 = Math.max(0, parseInt(w10Str || '0', 10));
+          // Approximate last 5 as half of last10
+          const w5 = Math.max(0, Math.min(5, Math.round((w10 / 10) * 5)));
+          const l5 = 5 - w5;
+
+          setTeamStats({
+            record: { wins, losses },
+            ats: { covers: 0, misses: 0 }, // Placeholder until ATS data available
+            ou: { overs: 0, unders: 0 },   // Placeholder until O/U data available
+            last5: { wins: w5, losses: l5 },
+            // trends optional; leave undefined until backend provides metrics
+          });
+        }
         
         // If we got Bulls analysis data, use it; otherwise use mock data
         if (bullsAnalysisData) {

@@ -141,6 +141,21 @@ VITE_SUPABASE_ANON_KEY=your-anon-key
 ODDS_API_KEY=your-odds-api-key
 ```
 
+#### Backend .env keys (odds and NBA data)
+
+Place these in `backend/.env` (backend loads them via `python-dotenv`):
+
+```env
+# Required for real-time odds (The Odds API)
+ODDS_API_KEY=your-odds-api-key
+
+# Optional: Ball Don't Lie (NBA data) – increases rate limits if you have a key
+BALLDONTLIE_API_KEY=your-balldontlie-api-key
+```
+
+- Without `ODDS_API_KEY` the app falls back to limited/mock odds data. For production-quality odds, set the key.
+- `BALLDONTLIE_API_KEY` is optional. Most endpoints are public; the key can raise rate limits and stability under load.
+
 ### 2. Supabase Setup
 
 Create the following tables in your Supabase project:
@@ -203,6 +218,7 @@ docker compose down
 - `GET /api/teams` - Get all teams
 - `GET /api/games/today` - Get today's games
 - `GET /api/odds/{game_id}` - Get odds for a specific game
+- `GET /api/odds/find` - Find odds by team abbreviations and date/slug (e.g., `?home_abbr=CHI&away_abbr=LAL&date=2025-11-05`)
 
 ### Reports (Generated automatically at scheduled times)
 - `GET /api/reports/750am` - Previous day analysis

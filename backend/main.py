@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 import pytz
-from external_apis import fetch_nba_teams, fetch_nba_games, fetch_live_odds, fetch_nba_players, fetch_player_stats
+from external_apis import fetch_nba_teams, fetch_nba_games, fetch_live_odds, fetch_nba_players, fetch_player_stats, fetch_player_by_id
 
 # Temporarily use mock implementations to avoid httpx_socks conflicts with supabase
 # These will be loaded dynamically when needed
@@ -305,6 +305,117 @@ app.add_middleware(
 )
 
 
+@app.get("/api/odds/find")
+async def find_game_odds(
+    slug: Optional[str] = None,
+    home_abbr: Optional[str] = None,
+    away_abbr: Optional[str] = None,
+    date: Optional[str] = None,
+):
+    """Find odds for a single game by team abbreviations and date or slug.
+    - slug formats accepted (examples): CHI-LAL-2025-11-05, CHI@LAL-20251105
+    - query params: home_abbr, away_abbr, date (YYYY-MM-DD)
+    Returns the matched game with bookmakers and a flattened odds list for convenience.
+    """
+    try:
+        # Build abbr -> full name map
+        teams = await fetch_nba_teams()
+        abbr_to_full = { (t.get("abbreviation") or "").upper(): t.get("full_name") for t in teams }
+
+        ha = (home_abbr or "").upper() or None
+        aa = (away_abbr or "").upper() or None
+        game_date = date
+
+        # Parse slug if given
+        if slug and (not ha or not aa):
+            import re
+            # Extract tokens; assume first two 2-4 letter upper tokens are abbrs
+            tokens = re.split(r"[^A-Za-z0-9]+", slug.upper())
+            cand_abbrs = [t for t in tokens if 2 <= len(t) <= 4 and t.isalpha()]
+            if len(cand_abbrs) >= 2:
+                ha = ha or cand_abbrs[0]
+                aa = aa or cand_abbrs[1]
+            # Extract date (8 or 10 digits)
+            cand_dates = [t for t in tokens if t.isdigit() and len(t) in (8,10)]
+            if cand_dates and not game_date:
+                d = cand_dates[0]
+                if len(d) == 8:
+                    game_date = f"{d[0:4]}-{d[4:6]}-{d[6:8]}"
+                else:
+                    # try yyyy-mm-dd already formatted tokens joined back
+                    game_date = "-".join([d[0:4], d[5:7], d[8:10]]) if '-' in slug else d
+
+        if not (ha and aa):
+            raise HTTPException(status_code=400, detail="home_abbr and away_abbr (or slug) are required")
+
+        home_full = abbr_to_full.get(ha)
+        away_full = abbr_to_full.get(aa)
+        if not home_full or not away_full:
+            raise HTTPException(status_code=404, detail="Unknown team abbreviation(s)")
+
+        # Use external odds list regardless of DB presence for freshness
+        games = await fetch_live_odds()
+        match = None
+        for g in games:
+            if g.get("homeTeam") == home_full and g.get("awayTeam") == away_full:
+                if game_date:
+                    # Compare date only
+                    gdate = (g.get("startTime") or "")[:10]
+                    if gdate == game_date:
+                        match = g
+                        break
+                else:
+                    match = g
+                    break
+
+        if not match:
+            # Try reversed home/away
+            for g in games:
+                if g.get("homeTeam") == away_full and g.get("awayTeam") == home_full:
+                    if game_date:
+                        gdate = (g.get("startTime") or "")[:10]
+                        if gdate == game_date:
+                            match = g
+                            break
+                    else:
+                        match = g
+                        break
+
+        if not match:
+            return {"game": None, "odds": [], "source": "external_odds", "note": "no match"}
+
+        # Build flattened odds like /api/odds/{game_id}
+        flat_rows = []
+        for bm in match.get("bookmakers", []):
+            name = bm.get("name")
+            ml = bm.get("moneyline", {})
+            if ml.get("home") is not None:
+                flat_rows.append({"bookmaker_title": name, "bookmaker_key": name, "market_type": "h2h", "team": match.get("homeTeam"), "price": ml.get("home")})
+            if ml.get("away") is not None:
+                flat_rows.append({"bookmaker_title": name, "bookmaker_key": name, "market_type": "h2h", "team": match.get("awayTeam"), "price": ml.get("away")})
+            sp = bm.get("spread", {})
+            if sp:
+                line = sp.get("line", 0)
+                if sp.get("home") is not None:
+                    flat_rows.append({"bookmaker_title": name, "bookmaker_key": name, "market_type": "spread", "team": match.get("homeTeam"), "price": sp.get("home"), "point": line})
+                if sp.get("away") is not None:
+                    flat_rows.append({"bookmaker_title": name, "bookmaker_key": name, "market_type": "spread", "team": match.get("awayTeam"), "price": sp.get("away"), "point": line})
+            tot = bm.get("total", {})
+            if tot:
+                tline = tot.get("line", 0)
+                if tot.get("over") is not None:
+                    flat_rows.append({"bookmaker_title": name, "bookmaker_key": name, "market_type": "totals", "outcome_name": "Over", "price": tot.get("over"), "point": tline})
+                if tot.get("under") is not None:
+                    flat_rows.append({"bookmaker_title": name, "bookmaker_key": name, "market_type": "totals", "outcome_name": "Under", "price": tot.get("under"), "point": tline})
+
+        return {"game": match, "odds": flat_rows, "source": "external_odds"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error finding game odds: {e}")
+        raise HTTPException(status_code=500, detail="Failed to find game odds")
+
+
 @app.get("/health")
 async def health():
     """Health check endpoint"""
@@ -474,10 +585,85 @@ async def get_game_odds(game_id: str):
     """Get odds for a specific game"""
     try:
         supabase = app.state.supabase
-        response = await anyio.to_thread.run_sync(
-            lambda: supabase.table("odds").select("*").eq("game_id", game_id).execute()
-        )
-        return {"odds": response.data}
+        if supabase:
+            response = await anyio.to_thread.run_sync(
+                lambda: supabase.table("odds").select("*").eq("game_id", game_id).execute()
+            )
+            return {"odds": response.data}
+
+        # External fallback using live odds list
+        games = await fetch_live_odds()
+        match = next((g for g in games if g.get("gameId") == game_id), None)
+        if not match:
+            return {"odds": [], "source": "external_odds", "note": "game not found"}
+
+        flat_rows = []
+        for bm in match.get("bookmakers", []):
+            name = bm.get("name")
+            # Moneyline
+            ml = bm.get("moneyline", {})
+            if ml.get("home") is not None:
+                flat_rows.append({
+                    "bookmaker_title": name,
+                    "bookmaker_key": name,
+                    "market_type": "h2h",
+                    "team": match.get("homeTeam"),
+                    "price": ml.get("home"),
+                })
+            if ml.get("away") is not None:
+                flat_rows.append({
+                    "bookmaker_title": name,
+                    "bookmaker_key": name,
+                    "market_type": "h2h",
+                    "team": match.get("awayTeam"),
+                    "price": ml.get("away"),
+                })
+            # Spread
+            sp = bm.get("spread", {})
+            if sp:
+                line = sp.get("line", 0)
+                if sp.get("home") is not None:
+                    flat_rows.append({
+                        "bookmaker_title": name,
+                        "bookmaker_key": name,
+                        "market_type": "spread",
+                        "team": match.get("homeTeam"),
+                        "price": sp.get("home"),
+                        "point": line,
+                    })
+                if sp.get("away") is not None:
+                    flat_rows.append({
+                        "bookmaker_title": name,
+                        "bookmaker_key": name,
+                        "market_type": "spread",
+                        "team": match.get("awayTeam"),
+                        "price": sp.get("away"),
+                        "point": line,
+                    })
+            # Totals
+            tot = bm.get("total", {})
+            if tot:
+                tline = tot.get("line", 0)
+                if tot.get("over") is not None:
+                    flat_rows.append({
+                        "bookmaker_title": name,
+                        "bookmaker_key": name,
+                        "market_type": "totals",
+                        "outcome_name": "Over",
+                        "price": tot.get("over"),
+                        "point": tline,
+                    })
+                if tot.get("under") is not None:
+                    flat_rows.append({
+                        "bookmaker_title": name,
+                        "bookmaker_key": name,
+                        "market_type": "totals",
+                        "outcome_name": "Under",
+                        "price": tot.get("under"),
+                        "point": tline,
+                    })
+
+        return {"odds": flat_rows, "source": "external_odds"}
     except Exception as e:
         return {"error": str(e)}, 500
 
@@ -648,7 +834,65 @@ async def get_team_stats(team_abbrev: str, season: str = "2024-25"):
     try:
         supabase = app.state.supabase
         if not supabase:
-            raise HTTPException(status_code=503, detail="Supabase not configured")
+            # Build real team stats from recent external games
+            teams = await fetch_nba_teams()
+            team = next((t for t in teams if (t.get("abbreviation") or "").upper() == team_abbrev.upper()), None)
+            if not team:
+                raise HTTPException(status_code=404, detail=f"Team '{team_abbrev}' not found")
+
+            # Fetch last 60 days games and compute last 10
+            end_date = datetime.now().date()
+            start_date = end_date - timedelta(days=60)
+            games = await fetch_nba_games(start_date=start_date.isoformat(), end_date=end_date.isoformat(), team_id=str(team.get("id")))
+            games = [g for g in games if g.get("home_team_score") is not None and g.get("visitor_team_score") is not None]
+            games.sort(key=lambda g: g.get("commence_time", ""), reverse=True)
+            last10 = games[:10]
+
+            wins = 0
+            losses = 0
+            pts = 0
+            opp_pts = 0
+            abbr = team_abbrev.upper()
+            for g in last10:
+                is_home = (g.get("home_team_abbreviation") or "") == abbr
+                home = g.get("home_team_score") or 0
+                away = g.get("visitor_team_score") or 0
+                team_pts = home if is_home else away
+                opp = away if is_home else home
+                pts += team_pts
+                opp_pts += opp
+                if team_pts > opp:
+                    wins += 1
+                else:
+                    losses += 1
+
+            cnt = max(1, len(last10))
+            ppg = round(pts / cnt, 1)
+            papg = round(opp_pts / cnt, 1)
+
+            team_stats = {
+                **team,
+                "conference": team.get("conference"),
+                "division": team.get("division"),
+                "season_stats": {
+                    "wins": wins,
+                    "losses": losses,
+                    "win_percentage": round(wins / (wins + losses), 3) if (wins + losses) else 0,
+                    "points_per_game": ppg,
+                    "points_allowed": papg,
+                    "offensive_rating": ppg,
+                    "defensive_rating": papg,
+                    "net_rating": round(ppg - papg, 1)
+                },
+                "recent_form": {
+                    "last_10": f"{wins}-{losses}"
+                },
+                "betting_stats": {
+                    "avg_total": round(((pts + opp_pts) / cnt), 1)
+                },
+                "last_updated": datetime.now().isoformat()
+            }
+            return team_stats
 
         # Get team info
         team_response = await anyio.to_thread.run_sync(
@@ -663,7 +907,7 @@ async def get_team_stats(team_abbrev: str, season: str = "2024-25"):
 
         team = team_response.data[0]
         
-        # Mock team stats - in production, these would come from scraping
+    # Mock team stats - in production, these would come from scraping/DB metrics
         import random
         
         # Determine conference and division
@@ -1043,7 +1287,13 @@ async def get_player_details(player_id: str):
     """Get detailed information for a specific player"""
     try:
         supabase = app.state.supabase
-        
+        if not supabase:
+            # External fallback
+            player = await fetch_player_by_id(player_id)
+            if not player:
+                raise HTTPException(status_code=404, detail=f"Player with ID '{player_id}' not found")
+            return {"player": player}
+
         response = await anyio.to_thread.run_sync(
             lambda: supabase.table("players")
             .select("""
@@ -1084,7 +1334,28 @@ async def search_players_by_name(
     try:
         supabase = app.state.supabase
         if not supabase:
-            raise HTTPException(status_code=503, detail="Supabase not configured")
+            # External search fallback
+            players = await fetch_nba_players(search=name)
+            # Ordering whitelist
+            allowed_cols = {"name","jersey_number","team_abbreviation","position"}
+            for col, desc_flag in _parse_ordering(order_by, order_dir, allowed_cols):
+                players.sort(key=lambda x: x.get(col), reverse=desc_flag)
+
+            # Pagination
+            lim = _clamp_limit(limit, default=50)
+            start = max(0, int(offset))
+            end = start + lim
+            page = players[start:end]
+
+            return {
+                "query": name,
+                "players": page,
+                "count": len(page),
+                "total": len(players),
+                "limit": lim,
+                "offset": offset,
+                "source": "balldontlie"
+            }
 
         q = supabase.table("players").select(
             """
@@ -1169,12 +1440,38 @@ async def get_750am_report():
         today = datetime.now().date()
         yesterday = (today - timedelta(days=1)).isoformat()
         games = await fetch_nba_games(start_date=yesterday, end_date=yesterday)
+        # Create simple 'results vs line' using median total as proxy for OU
+        totals = [(g.get('home_team_score', 0) or 0) + (g.get('visitor_team_score', 0) or 0) for g in games]
+        median_total = sorted(totals)[len(totals)//2] if totals else 0
+        results_vs_line = []
+        for g in games[:10]:
+            home = g.get('home_team')
+            away = g.get('away_team')
+            hs = g.get('home_team_score', 0) or 0
+            as_ = g.get('visitor_team_score', 0) or 0
+            winner = home if hs >= as_ else away
+            ou = 'OVER' if (hs + as_) > median_total else 'UNDER'
+            results_vs_line.append({
+                'team': f"{home} vs {away}",
+                'result': 'W' if winner == home else 'L',
+                'ats': 'PUSH',
+                'ou': ou
+            })
         bulls_games = [g for g in games if 'Bulls' in (g.get('home_team','') + g.get('away_team',''))]
         report = {
             "report_type": "750am_previous_day",
             "timestamp": datetime.now().isoformat(),
-            "games_analyzed": len(games),
-            "bulls_games": bulls_games[:1],
+            "gamesAnalyzed": len(games),
+            "resultsVsLine": results_vs_line,
+            "topTrends": [
+                "Favorites ATS: n/a (no line data)",
+                "O/U proxy uses median total"
+            ],
+            "bullsAnalysis": {
+                "lastGame": (f"{bulls_games[0].get('home_team')} {bulls_games[0].get('home_team_score', 0)} - "
+                              f"{bulls_games[0].get('away_team')} {bulls_games[0].get('visitor_team_score', 0)}") if bulls_games else "No game",
+                "keyPlayers": []
+            },
             "source": "balldontlie"
         }
         return report
@@ -1189,11 +1486,19 @@ async def get_800am_report():
         today = datetime.now().date()
         yesterday = (today - timedelta(days=1)).isoformat()
         games = await fetch_nba_games(start_date=yesterday, end_date=yesterday)
+        avg_total = round(sum(((g.get('home_team_score',0) or 0) + (g.get('visitor_team_score',0) or 0)) for g in games) / max(1, len(games)), 1) if games else 0
         report = {
             "report_type": "800am_morning",
             "timestamp": datetime.now().isoformat(),
-            "yesterday_games": len(games),
-            "notes": "Summary generated from real game schedule",
+            "yesterdayResults": [
+                f"{g.get('home_team')} {g.get('home_team_score',0)} - {g.get('away_team')} {g.get('visitor_team_score',0)}"
+                for g in games[:10]
+            ],
+            "trends7Day": {
+                "offRtg": "OffRtg: N/A",
+                "defRtg": "DefRtg: N/A",
+                "avgTotal": f"Avg Total: {avg_total}"
+            },
             "source": "balldontlie"
         }
         return report
@@ -1397,85 +1702,73 @@ async def get_teams_analysis():
     """Get comprehensive analysis for all NBA teams"""
     try:
         supabase = app.state.supabase
-        
-        # Get all teams with basic info
-        teams_response = await anyio.to_thread.run_sync(
-            lambda: supabase.table("teams").select("*").order("abbreviation").execute()
-        )
-        
-        # Generate mock analysis data for each team (in production, this would come from real data)
+        if supabase:
+            teams_response = await anyio.to_thread.run_sync(
+                lambda: supabase.table("teams").select("*").order("abbreviation").execute()
+            )
+            teams = teams_response.data or []
+        else:
+            teams = await fetch_nba_teams()
+
+        end_date = datetime.now().date()
+        start_date = end_date - timedelta(days=45)
         teams_analysis = []
-        conferences = {
-            'Eastern': ['ATL', 'BOS', 'BKN', 'CHA', 'CHI', 'CLE', 'DET', 'IND', 'MIA', 'MIL', 'NYK', 'ORL', 'PHI', 'TOR', 'WAS'],
-            'Western': ['DAL', 'DEN', 'GSW', 'HOU', 'LAC', 'LAL', 'MEM', 'MIN', 'NOP', 'OKC', 'PHX', 'POR', 'SAC', 'SAS', 'UTA']
-        }
-        
-        divisions = {
-            'Atlantic': ['BOS', 'BKN', 'NYK', 'PHI', 'TOR'],
-            'Central': ['CHI', 'CLE', 'DET', 'IND', 'MIL'],
-            'Southeast': ['ATL', 'CHA', 'MIA', 'ORL', 'WAS'],
-            'Northwest': ['DEN', 'MIN', 'OKC', 'POR', 'UTA'],
-            'Pacific': ['GSW', 'LAC', 'LAL', 'PHX', 'SAC'],
-            'Southwest': ['DAL', 'HOU', 'MEM', 'NOP', 'SAS']
-        }
-        
-        for team in teams_response.data:
-            abbr = team['abbreviation']
-            
-            # Determine conference and division
-            conference = 'Eastern' if abbr in conferences['Eastern'] else 'Western'
-            division = next((div for div, teams in divisions.items() if abbr in teams), 'Unknown')
-            
-            # Mock statistics (in production, fetch from games/odds tables)
-            import random
-            wins = random.randint(15, 45)
-            losses = random.randint(15, 45)
-            
-            team_analysis = {
-                **team,
-                'conference': conference,
-                'division': division,
-                'season_stats': {
-                    'wins': wins,
-                    'losses': losses,
-                    'win_percentage': round(wins / (wins + losses), 3),
-                    'points_per_game': round(random.uniform(105, 125), 1),
-                    'points_allowed': round(random.uniform(105, 125), 1),
-                    'offensive_rating': round(random.uniform(105, 125), 1),
-                    'defensive_rating': round(random.uniform(105, 125), 1),
-                    'net_rating': round(random.uniform(-15, 15), 1)
-                },
-                'recent_form': {
-                    'last_10': f"{random.randint(3, 8)}-{random.randint(2, 7)}",
-                    'last_5': f"{random.randint(1, 5)}-{random.randint(0, 4)}",
-                    'home_record': f"{random.randint(8, 25)}-{random.randint(5, 20)}",
-                    'away_record': f"{random.randint(5, 20)}-{random.randint(10, 25)}",
-                    'vs_conference': f"{random.randint(10, 25)}-{random.randint(10, 25)}"
-                },
-                'betting_stats': {
-                    'ats_record': f"{random.randint(25, 35)}-{random.randint(20, 30)}",
-                    'ats_percentage': round(random.uniform(0.45, 0.60), 3),
-                    'over_under': f"{random.randint(25, 35)}-{random.randint(20, 30)}",
-                    'ou_percentage': round(random.uniform(0.45, 0.60), 3),
-                    'avg_total': round(random.uniform(210, 235), 1)
-                },
-                'key_players': [
-                    f"Player {random.randint(1, 50)}",
-                    f"Player {random.randint(1, 50)}",
-                    f"Player {random.randint(1, 50)}"
-                ],
-                'strength_rating': random.randint(65, 95),
-                'last_updated': datetime.now().isoformat()
-            }
-            
-            teams_analysis.append(team_analysis)
-        
+        for team in teams:
+            abbr = team.get('abbreviation') if isinstance(team, dict) else team.get('abbreviation')
+            team_id = str(team.get('id')) if isinstance(team, dict) else str(team.get('id'))
+            try:
+                games = await fetch_nba_games(start_date=start_date.isoformat(), end_date=end_date.isoformat(), team_id=team_id)
+                games = [g for g in games if g.get("home_team_score") is not None and g.get("visitor_team_score") is not None]
+                games.sort(key=lambda g: g.get("commence_time", ""), reverse=True)
+                last10 = games[:10]
+                wins = 0
+                losses = 0
+                pts = 0
+                opp_pts = 0
+                for g in last10:
+                    is_home = (g.get("home_team_abbreviation") or "") == abbr
+                    home = g.get("home_team_score") or 0
+                    away = g.get("visitor_team_score") or 0
+                    team_pts = home if is_home else away
+                    opp = away if is_home else home
+                    pts += team_pts
+                    opp_pts += opp
+                    if team_pts > opp:
+                        wins += 1
+                    else:
+                        losses += 1
+                cnt = max(1, len(last10))
+                ppg = round(pts / cnt, 1)
+                papg = round(opp_pts / cnt, 1)
+                teams_analysis.append({
+                    **team,
+                    'conference': team.get('conference'),
+                    'division': team.get('division'),
+                    'season_stats': {
+                        'wins': wins,
+                        'losses': losses,
+                        'win_percentage': round(wins / (wins + losses), 3) if (wins + losses) else 0,
+                        'points_per_game': ppg,
+                        'points_allowed': papg,
+                        'net_rating': round(ppg - papg, 1)
+                    },
+                    'recent_form': {
+                        'last_10': f"{wins}-{losses}"
+                    },
+                    'betting_stats': {
+                        'avg_total': round(((pts + opp_pts) / cnt), 1)
+                    },
+                    'last_updated': datetime.now().isoformat()
+                })
+            except Exception:
+                continue
+
         return {
             'teams': teams_analysis,
             'count': len(teams_analysis),
             'conferences': {
-                'Eastern': [t for t in teams_analysis if t['conference'] == 'Eastern'],
-                'Western': [t for t in teams_analysis if t['conference'] == 'Western']
+                'Eastern': [t for t in teams_analysis if t.get('conference') == 'Eastern'],
+                'Western': [t for t in teams_analysis if t.get('conference') == 'Western']
             }
         }
         
@@ -1489,76 +1782,75 @@ async def get_team_analysis(team_abbrev: str):
     """Get detailed analysis for a specific team"""
     try:
         supabase = app.state.supabase
-        team_abbrev = team_abbrev.upper()
-        
-        # Get team basic info
+        abbr = team_abbrev.upper()
+        if not supabase:
+            teams = await fetch_nba_teams()
+            team = next((t for t in teams if (t.get('abbreviation') or '').upper() == abbr), None)
+            if not team:
+                raise HTTPException(status_code=404, detail=f"Team '{abbr}' not found")
+
+            end_date = datetime.now().date()
+            start_date = end_date - timedelta(days=45)
+            games = await fetch_nba_games(start_date=start_date.isoformat(), end_date=end_date.isoformat(), team_id=str(team.get('id')))
+            games = [g for g in games if g.get('home_team_score') is not None and g.get('visitor_team_score') is not None]
+            games.sort(key=lambda g: g.get('commence_time', ''), reverse=True)
+            recent = []
+            wins = 0
+            losses = 0
+            for g in games[:10]:
+                is_home = (g.get('home_team_abbreviation') or '') == abbr
+                home = g.get('home_team_score') or 0
+                away = g.get('visitor_team_score') or 0
+                team_score = home if is_home else away
+                opp_score = away if is_home else home
+                recent.append({
+                    'date': g.get('commence_time', '')[:10],
+                    'opponent': g.get('away_team_abbreviation') if is_home else g.get('home_team_abbreviation'),
+                    'home': is_home,
+                    'team_score': team_score,
+                    'opponent_score': opp_score,
+                    'result': 'W' if team_score > opp_score else 'L',
+                    'margin': abs(team_score - opp_score)
+                })
+                if team_score > opp_score:
+                    wins += 1
+                else:
+                    losses += 1
+
+            ppg = round(sum((rg['team_score'] for rg in recent), 0) / max(1, len(recent)), 1) if recent else 0
+            papg = round(sum((rg['opponent_score'] for rg in recent), 0) / max(1, len(recent)), 1) if recent else 0
+
+            analysis = {
+                **team,
+                'season_record': {
+                    'wins': wins,
+                    'losses': losses,
+                    'win_percentage': round(wins / (wins + losses), 3) if (wins + losses) else 0
+                },
+                'advanced_stats': {
+                    'offensive_rating': ppg,
+                    'defensive_rating': papg,
+                    'net_rating': round(ppg - papg, 1)
+                },
+                'recent_games': recent,
+                'form_analysis': {
+                    'last_10_games': f"{wins}-{losses}"
+                },
+                'betting_trends': {
+                    'avg_total': round(ppg + papg, 1)
+                },
+                'last_updated': datetime.now().isoformat()
+            }
+            return analysis
+
+        # DB path (return team basic info with timestamp)
         team_response = await anyio.to_thread.run_sync(
-            lambda: supabase.table("teams")
-            .select("*")
-            .eq("abbreviation", team_abbrev)
-            .single()
-            .execute()
+            lambda: supabase.table('teams').select('*').eq('abbreviation', abbr).single().execute()
         )
-        
         if not team_response.data:
-            raise HTTPException(status_code=404, detail=f"Team '{team_abbrev}' not found")
-        
+            raise HTTPException(status_code=404, detail=f"Team '{abbr}' not found")
         team = team_response.data
-        
-        # Generate comprehensive team analysis
-        import random
-        from datetime import datetime, timedelta
-        
-        # Mock recent games
-        recent_games = []
-        for i in range(5):
-            game_date = datetime.now() - timedelta(days=(i+1)*3)
-            opponent = random.choice(['LAL', 'BOS', 'GSW', 'MIA', 'PHX'])
-            is_home = random.choice([True, False])
-            team_score = random.randint(95, 130)
-            opp_score = random.randint(95, 130)
-            
-            recent_games.append({
-                'date': game_date.strftime('%Y-%m-%d'),
-                'opponent': opponent,
-                'home': is_home,
-                'team_score': team_score,
-                'opponent_score': opp_score,
-                'result': 'W' if team_score > opp_score else 'L',
-                'margin': abs(team_score - opp_score)
-            })
-        
-        # Generate detailed analysis
-        analysis = {
-            **team,
-            'season_record': {
-                'wins': random.randint(20, 45),
-                'losses': random.randint(15, 40),
-                'win_percentage': round(random.uniform(0.35, 0.75), 3)
-            },
-            'advanced_stats': {
-                'offensive_rating': round(random.uniform(105, 125), 1),
-                'defensive_rating': round(random.uniform(105, 125), 1),
-                'net_rating': round(random.uniform(-10, 15), 1),
-                'pace': round(random.uniform(95, 105), 1),
-                'effective_fg_percentage': round(random.uniform(0.50, 0.60), 3),
-                'true_shooting_percentage': round(random.uniform(0.52, 0.62), 3)
-            },
-            'recent_games': recent_games,
-            'form_analysis': {
-                'last_10_games': f"{random.randint(4, 8)}-{random.randint(2, 6)}",
-                'home_form': f"{random.randint(10, 20)}-{random.randint(5, 15)}",
-                'away_form': f"{random.randint(8, 18)}-{random.randint(7, 17)}"
-            },
-            'betting_trends': {
-                'ats_home': f"{random.randint(10, 20)}-{random.randint(8, 18)}",
-                'ats_away': f"{random.randint(8, 18)}-{random.randint(10, 20)}",
-                'over_under_home': f"{random.randint(12, 22)}-{random.randint(8, 18)}"
-            },
-            'last_updated': datetime.now().isoformat()
-        }
-        
-        return analysis
+        return {**team, 'last_updated': datetime.now().isoformat()}
         
     except HTTPException:
         raise
